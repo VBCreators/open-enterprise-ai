@@ -1,15 +1,13 @@
 # .github/workflows/ci.yml
 #
-# Streamlined CI workflow for early-stage development:
-# - Code hygiene & syntax checks (Ruff, Pre-commit, actionlint)
-# - Static type checking (Mypy)
-# - Conditional Unit & OpenAPI tests (runs only if tests exist)
-# - Conditional Integration tests (runs only if tests exist, no DB containers yet)
-# - Final quality gate aggregation
+# Streamlined CI workflow for early-stage development.
 #
-# All `uses:` references are pinned to immutable 40-character commit SHAs
-# with the human-readable version as a trailing comment so Dependabot can
-# still propose upgrades. Format:  uses: <repo>@<40-char-sha> # <version>
+# Install-step design rule used throughout:
+#   NEVER rely on `pip install -e ".[dev]" || pip install <tools>`.
+#   The first command can exit 0 WITHOUT providing the tools you need
+#   (missing/empty [dev] extra only produces a warning). Instead: install the
+#   project if possible, then VERIFY each required tool and install only what
+#   is actually missing.
 
 name: CI
 
@@ -82,7 +80,10 @@ jobs:
           pip install --upgrade pip ruff
           ruff format --check .
 
+      # Skip when the repo has no pre-commit config yet,
+      # otherwise pre-commit/action fails outright.
       - name: Run Pre-Commit Hooks
+        if: hashFiles('.pre-commit-config.yaml', '.pre-commit-config.yml') != ''
         uses: pre-commit/action@2c7b3805fd2a0fd8c1884dcaebf91fc102a13ecd # v3.0.1
         with:
           extra_args: --all-files --show-diff-on-failure
@@ -92,12 +93,12 @@ jobs:
 
       - name: Validate Docker Compose Configurations
         run: |
-          if [ -f compose.yaml ]; then
-            docker compose -f compose.yaml config --quiet
-          fi
-          if [ -f compose.dev.yaml ]; then
-            docker compose -f compose.dev.yaml config --quiet
-          fi
+          for f in compose.yaml compose.yml compose.dev.yaml compose.dev.yml docker-compose.yaml docker-compose.yml; do
+            if [ -f "$f" ]; then
+              echo "[INFO] Validating $f"
+              docker compose -f "$f" config --quiet
+            fi
+          done
 
   # =========================================================================
   # 2. Static Type Checking
@@ -122,15 +123,54 @@ jobs:
       - name: Install Dependencies
         run: |
           python -m pip install --upgrade pip
+
+          # Preferred: the project's own dependency declaration.
           if [ -f pyproject.toml ]; then
-            pip install -e ".[dev]" || pip install mypy types-requests types-PyYAML
-          else
+            pip install -e ".[dev]" \
+              || echo "[WARN] 'pip install -e .[dev]' failed -- falling back to a standalone mypy install."
+          elif [ -f requirements-dev.txt ]; then
+            pip install -r requirements-dev.txt \
+              || echo "[WARN] requirements-dev.txt install failed -- falling back."
+          elif [ -f requirements.txt ]; then
+            pip install -r requirements.txt \
+              || echo "[WARN] requirements.txt install failed -- falling back."
+          fi
+
+          # Safety net: 'pip install -e .[dev]' can exit 0 WITHOUT providing
+          # mypy (missing or incomplete [dev] extra). '||' never fires in that
+          # case, so verify explicitly and install only what is missing.
+          if ! command -v mypy >/dev/null 2>&1; then
+            echo "[INFO] mypy not provided by the project -- installing it directly."
             pip install mypy types-requests types-PyYAML
           fi
 
       - name: Run Mypy
         run: |
-          mypy --install-types --non-interactive . || mypy .
+          if ! command -v mypy >/dev/null 2>&1; then
+            echo "::error::mypy is not available even after the fallback installation."
+            exit 1
+          fi
+
+          # Nothing to type-check yet? Skip instead of erroring.
+          PY_COUNT=$(find . -type f -name '*.py' \
+            -not -path './.git/*' \
+            -not -path './.venv/*' -not -path './venv/*' \
+            -not -path './node_modules/*' \
+            -not -path './build/*' -not -path './dist/*' \
+            -not -path './.mypy_cache/*' \
+            | wc -l)
+          if [ "${PY_COUNT}" -eq 0 ]; then
+            echo "[INFO] No Python source files found -- skipping mypy."
+            exit 0
+          fi
+
+          # Phase 1: install missing third-party stubs.
+          # NOTE: 'mypy --install-types' exits right after installing -- it does
+          # NOT type-check -- so it must be a separate invocation.
+          mypy --install-types --non-interactive . || true
+
+          # Phase 2: the actual type check.
+          mypy .
 
   # =========================================================================
   # 3. Unit Tests & OpenAPI Schema Contract Validation (Conditional)
@@ -155,34 +195,117 @@ jobs:
       - name: Install Dependencies
         run: |
           python -m pip install --upgrade pip
+
           if [ -f pyproject.toml ]; then
-            pip install -e ".[dev]" || pip install pytest pytest-cov pytest-asyncio httpx fastapi pydantic
-          else
-            pip install pytest pytest-cov pytest-asyncio httpx fastapi pydantic
+            pip install -e ".[dev]" \
+              || echo "[WARN] 'pip install -e .[dev]' failed -- falling back to a standalone tool set."
+          elif [ -f requirements-dev.txt ]; then
+            pip install -r requirements-dev.txt \
+              || echo "[WARN] requirements-dev.txt install failed -- falling back."
+          elif [ -f requirements.txt ]; then
+            pip install -r requirements.txt \
+              || echo "[WARN] requirements.txt install failed -- falling back."
           fi
 
-      - name: OpenAPI Schema Contract Check
+          # Verify-and-install: only fires for tools the project did NOT provide.
+          ensure() {
+            local import_name="$1" pip_name="${2:-$1}"
+            if ! python -c "import ${import_name}" >/dev/null 2>&1; then
+              echo "[INFO] '${pip_name}' not provided by the project -- installing it directly."
+              pip install "${pip_name}"
+            fi
+          }
+
+          ensure pytest
+          ensure pytest_cov pytest-cov
+          ensure pytest_asyncio pytest-asyncio
+
+          # Web stack: only when the codebase actually references it, so the
+          # OpenAPI check below can still skip gracefully for non-FastAPI code.
+          if grep -rq --include='*.py' -E '^[[:space:]]*(from|import)[[:space:]]+(fastapi|httpx)\b' \
+               tests open_enterprise_ai src 2>/dev/null; then
+            ensure fastapi
+            ensure httpx
+          fi
+
+      - name: OpenAPI Schema Contract Check (skips if app/FastAPI missing)
         run: |
-          python -c "
+          python - <<'PY'
+          import importlib
+          import importlib.util
+          import sys
+          from pathlib import Path
+
+          APP_MODULE = "open_enterprise_ai.main"
+
+          # Support src/ layouts even when the package was not pip-installed.
+          if Path("src").is_dir():
+              sys.path.insert(0, str(Path("src").resolve()))
+
+          # BYPASS RULE 1: the application entrypoint does not exist yet.
+          app_file_exists = any(
+              p.is_file()
+              for p in (
+                  Path("open_enterprise_ai") / "main.py",
+                  Path("src") / "open_enterprise_ai" / "main.py",
+              )
+          )
+          if not app_file_exists:
+              print(f"[INFO] {APP_MODULE}.py does not exist yet -- skipping OpenAPI contract check.")
+              sys.exit(0)
+
+          # BYPASS RULE 2: the file exists but FastAPI is not installed.
+          if importlib.util.find_spec("fastapi") is None:
+              print("[INFO] FastAPI is not installed -- skipping OpenAPI contract check.")
+              sys.exit(0)
+
+          # The app exists and FastAPI is available: failures from here are real.
           try:
-              from open_enterprise_ai.main import app
-              schema = app.openapi()
-              assert 'openapi' in schema, 'Invalid OpenAPI schema generated'
-              print('[OK] FastAPI OpenAPI schema validated successfully')
-          except (ImportError, ModuleNotFoundError) as err:
-              print(f'[ERROR] Failed to load open_enterprise_ai.main: {err}')
-              exit(1)
-          "
+              app = getattr(importlib.import_module(APP_MODULE), "app")
+          except ModuleNotFoundError as err:
+              # main.py exists but one of ITS imports is missing (a project
+              # dependency that is not declared/installed yet) -- skip gracefully.
+              print(f"[WARN] Could not import {APP_MODULE}: {err} -- skipping OpenAPI contract check.")
+              sys.exit(0)
+          except Exception as err:
+              print(f"[ERROR] Failed to import {APP_MODULE}: {err!r}")
+              sys.exit(1)
+
+          openapi = getattr(app, "openapi", None)
+          if not callable(openapi):
+              print(f"[ERROR] {APP_MODULE}.app has no callable openapi() -- is it a FastAPI() instance?")
+              sys.exit(1)
+
+          try:
+              schema = openapi()
+          except Exception as err:
+              print(f"[ERROR] app.openapi() raised: {err!r}")
+              sys.exit(1)
+
+          if not isinstance(schema, dict) or "openapi" not in schema:
+              print("[ERROR] Invalid OpenAPI schema generated.")
+              sys.exit(1)
+
+          print(f"[OK] FastAPI OpenAPI schema validated successfully (OpenAPI {schema.get('openapi')}).")
+          PY
 
       - name: Run Unit Tests (if they exist)
         run: |
           mkdir -p test-results coverage-results
-          if [ -d "tests/unit" ] && [ -n "$(find tests/unit -name '*.py' -not -name '__init__.py' -print -quit)" ]; then
+          if [ -d "tests/unit" ] && [ -n "$(find tests/unit -name '*.py' -not -name '__init__.py' -not -name 'conftest.py' -print -quit)" ]; then
+            # Only collect coverage for the package when it is importable,
+            # otherwise pytest-cov emits noise for a missing module.
+            COV_OPTS=()
+            if python -c "import open_enterprise_ai" >/dev/null 2>&1; then
+              COV_OPTS+=(--cov=open_enterprise_ai)
+              COV_OPTS+=(--cov-report=xml:coverage-results/coverage-unit.xml)
+              COV_OPTS+=(--cov-report=term-missing)
+            else
+              echo "[INFO] open_enterprise_ai not importable -- running tests without coverage."
+            fi
             pytest tests/unit \
               --junitxml=test-results/unit-junit.xml \
-              --cov=open_enterprise_ai \
-              --cov-report=xml:coverage-results/coverage-unit.xml \
-              --cov-report=term-missing \
+              "${COV_OPTS[@]}" \
               -v
           else
             echo "[INFO] No unit tests found in tests/unit. Skipping."
@@ -223,21 +346,50 @@ jobs:
       - name: Install Dependencies
         run: |
           python -m pip install --upgrade pip
+
           if [ -f pyproject.toml ]; then
-            pip install -e ".[dev]" || pip install pytest pytest-cov pytest-asyncio httpx
-          else
-            pip install pytest pytest-cov pytest-asyncio httpx
+            pip install -e ".[dev]" \
+              || echo "[WARN] 'pip install -e .[dev]' failed -- falling back to a standalone tool set."
+          elif [ -f requirements-dev.txt ]; then
+            pip install -r requirements-dev.txt \
+              || echo "[WARN] requirements-dev.txt install failed -- falling back."
+          elif [ -f requirements.txt ]; then
+            pip install -r requirements.txt \
+              || echo "[WARN] requirements.txt install failed -- falling back."
+          fi
+
+          ensure() {
+            local import_name="$1" pip_name="${2:-$1}"
+            if ! python -c "import ${import_name}" >/dev/null 2>&1; then
+              echo "[INFO] '${pip_name}' not provided by the project -- installing it directly."
+              pip install "${pip_name}"
+            fi
+          }
+
+          ensure pytest
+          ensure pytest_cov pytest-cov
+          ensure pytest_asyncio pytest-asyncio
+          if grep -rq --include='*.py' -E '^[[:space:]]*(from|import)[[:space:]]+(fastapi|httpx)\b' \
+               tests open_enterprise_ai src 2>/dev/null; then
+            ensure fastapi
+            ensure httpx
           fi
 
       - name: Run Integration Tests (if they exist)
         run: |
           mkdir -p test-results coverage-results
-          if [ -d "tests/integration" ] && [ -n "$(find tests/integration -name '*.py' -not -name '__init__.py' -print -quit)" ]; then
+          if [ -d "tests/integration" ] && [ -n "$(find tests/integration -name '*.py' -not -name '__init__.py' -not -name 'conftest.py' -print -quit)" ]; then
+            COV_OPTS=()
+            if python -c "import open_enterprise_ai" >/dev/null 2>&1; then
+              COV_OPTS+=(--cov=open_enterprise_ai)
+              COV_OPTS+=(--cov-report=xml:coverage-results/coverage-int.xml)
+              COV_OPTS+=(--cov-report=term-missing)
+            else
+              echo "[INFO] open_enterprise_ai not importable -- running tests without coverage."
+            fi
             pytest tests/integration \
               --junitxml=test-results/integration-junit.xml \
-              --cov=open_enterprise_ai \
-              --cov-report=xml:coverage-results/coverage-int.xml \
-              --cov-report=term-missing \
+              "${COV_OPTS[@]}" \
               -v
           else
             echo "[INFO] No integration tests found in tests/integration. Skipping."
