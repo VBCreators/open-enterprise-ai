@@ -1,0 +1,296 @@
+# .github/workflows/ci.yml
+#
+# Streamlined CI workflow for early-stage development:
+# - Code hygiene & syntax checks (Ruff, Pre-commit, actionlint)
+# - Static type checking (Mypy)
+# - Conditional Unit & OpenAPI tests (runs only if tests exist)
+# - Conditional Integration tests (runs only if tests exist, no DB containers yet)
+# - Final quality gate aggregation
+#
+# All `uses:` references are pinned to immutable 40-character commit SHAs
+# with the human-readable version as a trailing comment so Dependabot can
+# still propose upgrades. Format:  uses: <repo>@<40-char-sha> # <version>
+
+name: CI
+
+on:
+  push:
+    branches:
+      - main
+      - dev
+      - 'feature/**'
+      - 'bugfix/**'
+      - 'hotfix/**'
+      - 'refactor/**'
+      - 'chore/**'
+  pull_request:
+    branches:
+      - main
+      - dev
+    types:
+      - opened
+      - synchronize
+      - reopened
+      - ready_for_review
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+defaults:
+  run:
+    shell: bash
+
+env:
+  PYTHON_VERSION: '3.14'
+  PIP_DISABLE_PIP_VERSION_CHECK: '1'
+  PYTHONDONTWRITEBYTECODE: '1'
+  PYTHONUNBUFFERED: '1'
+
+jobs:
+  # =========================================================================
+  # 1. Code Quality, Formatting, Pre-Commit & Syntax Hygiene
+  # =========================================================================
+  format-and-lint:
+    name: Lint & Code Quality
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Set up Python
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          cache: pip
+          cache-dependency-path: |
+            pyproject.toml
+            requirements*.txt
+
+      - name: Run Ruff Lint & Format Check
+        uses: astral-sh/ruff-action@278981a28ce3188b1e39527901f38254bf3aac89 # v4.1.0
+        with:
+          args: check .
+
+      - name: Verify Ruff Formatting
+        run: |
+          pip install --upgrade pip ruff
+          ruff format --check .
+
+      - name: Run Pre-Commit Hooks
+        uses: pre-commit/action@2c7b3805fd2a0fd8c1884dcaebf91fc102a13ecd # v3.0.1
+        with:
+          extra_args: --all-files --show-diff-on-failure
+
+      - name: Validate Workflow YAML Files (actionlint)
+        uses: rhysd/actionlint@914e7df21a07ef503a81201c76d2b11c789d3fca # v1.7.12
+
+      - name: Validate Docker Compose Configurations
+        run: |
+          if [ -f compose.yaml ]; then
+            docker compose -f compose.yaml config --quiet
+          fi
+          if [ -f compose.dev.yaml ]; then
+            docker compose -f compose.dev.yaml config --quiet
+          fi
+
+  # =========================================================================
+  # 2. Static Type Checking
+  # =========================================================================
+  type-check:
+    name: Static Type Check (Mypy)
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Set up Python
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          cache: pip
+          cache-dependency-path: |
+            pyproject.toml
+            requirements*.txt
+
+      - name: Install Dependencies
+        run: |
+          python -m pip install --upgrade pip
+          if [ -f pyproject.toml ]; then
+            pip install -e ".[dev]" || pip install mypy types-requests types-PyYAML
+          else
+            pip install mypy types-requests types-PyYAML
+          fi
+
+      - name: Run Mypy
+        run: |
+          mypy --install-types --non-interactive . || mypy .
+
+  # =========================================================================
+  # 3. Unit Tests & OpenAPI Schema Contract Validation (Conditional)
+  # =========================================================================
+  unit-and-api-tests:
+    name: Unit & API Contract Tests
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Set up Python
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          cache: pip
+          cache-dependency-path: |
+            pyproject.toml
+            requirements*.txt
+
+      - name: Install Dependencies
+        run: |
+          python -m pip install --upgrade pip
+          if [ -f pyproject.toml ]; then
+            pip install -e ".[dev]" || pip install pytest pytest-cov pytest-asyncio httpx fastapi pydantic
+          else
+            pip install pytest pytest-cov pytest-asyncio httpx fastapi pydantic
+          fi
+
+      - name: OpenAPI Schema Contract Check
+        run: |
+          python -c "
+          try:
+              from ai_rag.main import app
+              schema = app.openapi()
+              assert 'openapi' in schema, 'Invalid OpenAPI schema generated'
+              print('[OK] FastAPI OpenAPI schema validated successfully')
+          except (ImportError, ModuleNotFoundError) as err:
+              print(f'[ERROR] Failed to load ai_rag.main: {err}')
+              exit(1)
+          "
+
+      - name: Run Unit Tests (if they exist)
+        run: |
+          mkdir -p test-results coverage-results
+          if [ -d "tests/unit" ] && [ -n "$(find tests/unit -name '*.py' -not -name '__init__.py' -print -quit)" ]; then
+            pytest tests/unit \
+              --junitxml=test-results/unit-junit.xml \
+              --cov=ai_rag \
+              --cov-report=xml:coverage-results/coverage-unit.xml \
+              --cov-report=term-missing \
+              -v
+          else
+            echo "[INFO] No unit tests found in tests/unit. Skipping."
+          fi
+
+      - name: Upload Unit Test Results
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: unit-test-results-${{ github.sha }}
+          path: |
+            test-results/
+            coverage-results/
+          if-no-files-found: ignore
+          retention-days: 7
+
+  # =========================================================================
+  # 4. Integration Tests (Conditional, No DB Containers)
+  # =========================================================================
+  integration-and-db-tests:
+    name: Integration Tests
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    needs: [format-and-lint]
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Set up Python
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          cache: pip
+          cache-dependency-path: |
+            pyproject.toml
+            requirements*.txt
+
+      - name: Install Dependencies
+        run: |
+          python -m pip install --upgrade pip
+          if [ -f pyproject.toml ]; then
+            pip install -e ".[dev]" || pip install pytest pytest-cov pytest-asyncio httpx
+          else
+            pip install pytest pytest-cov pytest-asyncio httpx
+          fi
+
+      - name: Run Integration Tests (if they exist)
+        run: |
+          mkdir -p test-results coverage-results
+          if [ -d "tests/integration" ] && [ -n "$(find tests/integration -name '*.py' -not -name '__init__.py' -print -quit)" ]; then
+            pytest tests/integration \
+              --junitxml=test-results/integration-junit.xml \
+              --cov=ai_rag \
+              --cov-report=xml:coverage-results/coverage-int.xml \
+              --cov-report=term-missing \
+              -v
+          else
+            echo "[INFO] No integration tests found in tests/integration. Skipping."
+          fi
+
+      - name: Upload Integration Test Results
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: integration-test-results-${{ github.sha }}
+          path: |
+            test-results/
+            coverage-results/
+          if-no-files-found: ignore
+          retention-days: 7
+
+  # =========================================================================
+  # 5. Final Quality Gate
+  # =========================================================================
+  coverage-gate:
+    name: CI Gate Check
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    if: always()
+    needs:
+      - format-and-lint
+      - type-check
+      - unit-and-api-tests
+      - integration-and-db-tests
+    steps:
+      - name: Verify All Required CI Checks Passed
+        env:
+          FORMAT_AND_LINT: ${{ needs.format-and-lint.result }}
+          TYPE_CHECK: ${{ needs.type-check.result }}
+          UNIT_AND_API: ${{ needs.unit-and-api-tests.result }}
+          INTEGRATION: ${{ needs.integration-and-db-tests.result }}
+        run: |
+          results=(
+            "${FORMAT_AND_LINT}"
+            "${TYPE_CHECK}"
+            "${UNIT_AND_API}"
+            "${INTEGRATION}"
+          )
+
+          for result in "${results[@]}"; do
+            case "$result" in
+              success|skipped)
+                ;;
+              *)
+                echo "::error::A required CI quality or testing check failed: ${result}"
+                exit 1
+                ;;
+            esac
+          done
+
+          echo "All required CI quality, linting, type-checking, and test gates passed."

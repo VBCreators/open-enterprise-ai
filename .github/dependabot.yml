@@ -1,0 +1,62 @@
+# .github/dependabot.yml
+#
+# Dependabot for maintaining:
+# 1. Pinned commit SHAs in GitHub Actions workflows
+# 2. Python package dependencies (pip / pyproject.toml)
+# 3. Docker base images (Dockerfile)
+
+version: 2
+updates:
+  # =========================================================================
+  # 1. GitHub Actions Workflows (Bumps pinned commit SHAs automatically)
+  # =========================================================================
+  - package-ecosystem: "github-actions"
+    directory: "/"
+    schedule:
+      interval: "daily"
+      time: "04:00"
+      timezone: "Etc/UTC"
+    open-pull-requests-limit: 10
+    commit-message:
+      prefix: "ci(actions)"
+    labels:
+      - "dependencies"
+      - "github-actions"
+    cooldown:
+      default-days: 7
+
+  # =========================================================================
+  # 2. Python Dependencies (pip / pyproject.toml)
+  # =========================================================================
+  - package-ecosystem: "pip"
+    directory: "/"
+    schedule:
+      interval: "daily"
+      time: "04:00"
+      timezone: "Etc/UTC"
+    open-pull-requests-limit: 10
+    commit-message:
+      prefix: "chore(deps)"
+    labels:
+      - "dependencies"
+      - "python"
+    cooldown:
+      default-days: 7
+
+  # =========================================================================
+  # 3. Docker Base Images
+  # =========================================================================
+  - package-ecosystem: "docker"
+    directory: "/"
+    schedule:
+      interval: "daily"
+      time: "04:00"
+      timezone: "Etc/UTC"
+    open-pull-requests-limit: 5
+    commit-message:
+      prefix: "chore(docker)"
+    labels:
+      - "dependencies"
+      - "docker"
+    cooldown:
+      default-days: 7

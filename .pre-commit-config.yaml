@@ -1,0 +1,205 @@
+# =============================================================================
+# Production-grade pre-commit configuration
+#
+# Install: pre-commit install --hook-type pre-commit --hook-type commit-msg --hook-type pre-push --hook-type post-checkout
+# Run all: pre-commit run --all-files
+# Update: pre-commit autoupdate
+# =============================================================================
+default_install_hook_types: [pre-commit, commit-msg, pre-push, post-checkout]
+default_stages: [pre-commit]
+fail_fast: false
+minimum_pre_commit_version: "3.7.0"
+repos:
+  # ===========================================================================
+  # 1. SECRET & CREDENTIAL LEAK DETECTION (Highest priority)
+  # ===========================================================================
+  - repo: https://github.com/gitleaks/gitleaks
+    rev: v8.30.0
+    hooks:
+      - id: gitleaks
+        name: Detect Hardcoded Secrets (Gitleaks)
+
+  - repo: https://github.com/pre-commit/pre-commit-hooks
+    rev: v6.0.0
+    hooks:
+      - id: detect-private-key
+        name: Detect Private Keys
+
+  # ===========================================================================
+  # 2. CODEBASE HYGIENE & PRE-COMMIT SAFETY
+  # ===========================================================================
+      - id: check-merge-conflict
+        name: Check for Unmerged Merge Conflicts
+      - id: check-added-large-files
+        name: Block Large Files
+        args: ['--maxkb=500']
+      - id: check-case-conflict
+        name: Check Filename Case Conflicts
+      - id: check-yaml
+        name: Validate YAML Files
+      - id: check-json
+        name: Validate JSON Files
+      - id: check-toml
+        name: Validate TOML Files
+      - id: check-ast
+        name: Validate Python Syntax (AST)
+      - id: no-commit-to-branch
+        name: Block Direct Commits to Protected Branches
+        args: ['--branch', 'main', '--branch', 'master', '--branch', 'develop']
+      - id: debug-statements
+        name: Detect Debugger Statements (pdb / breakpoint / ipdb)
+      - id: check-shebang-scripts-are-executable
+        name: Ensure Shebang Scripts Are Executable
+      - id: check-executables-have-shebangs
+        name: Ensure Executables Have Shebangs
+      - id: trailing-whitespace
+        name: Trim Trailing Whitespace
+      - id: end-of-file-fixer
+        name: Ensure Files End With a Newline
+      - id: mixed-line-ending
+        name: Normalize Line Endings
+        args: ['--fix=lf']
+
+  # ===========================================================================
+  # 3. PYTHON CODE LINTING & FORMATTING
+  # ===========================================================================
+  - repo: https://github.com/astral-sh/ruff-pre-commit
+    rev: v0.16.10
+    hooks:
+      - id: ruff-check
+        name: Ruff Linter
+        args: [--fix]
+      - id: ruff-format
+        name: Ruff Formatter
+
+  # ===========================================================================
+  # 4. AST-BASED SECURITY STATIC ANALYSIS (SAST)
+  # ===========================================================================
+  - repo: https://github.com/PyCQA/bandit
+    rev: 1.9.4
+    hooks:
+      - id: bandit
+        name: Bandit SAST – Python Security Scan
+        args: ["-c", "pyproject.toml"]
+        exclude: ^tests/
+        additional_dependencies: ["bandit[toml]"]
+
+  # ===========================================================================
+  # 5. COMMIT MESSAGE VALIDATION
+  # ===========================================================================
+  - repo: https://github.com/compilerla/conventional-pre-commit
+    rev: v4.4.0
+    hooks:
+      - id: conventional-pre-commit
+        name: Conventional Commits check
+        stages: [commit-msg]
+
+  # ===========================================================================
+  # 6. POST-CHECKOUT HOOKS
+  # ===========================================================================
+  - repo: https://github.com/pre-commit/pre-commit-hooks
+    rev: v6.0.0
+    hooks:
+      - id: check-executables-have-shebangs
+        stages: [post-checkout]
+        always_run: false
+
+  - repo: local
+    hooks:
+      - id: check-dependency-sync
+        name: Check Python Dependency Drift (Post-Checkout)
+        entry: >-
+          bash -c 'if git diff --name-only HEAD@{1} HEAD | grep -E "pyproject.toml|poetry.lock|requirements.txt" > /dev/null; then echo "[POST-CHECKOUT WARNING] Dependencies changed! Run pip install -r requirements.txt or poetry install."; fi'
+        language: system
+        stages: [post-checkout]
+        always_run: true
+        pass_filenames: false
+
+      - id: check-docker-drift
+        name: Check Docker Configuration Drift (Post-Checkout)
+        entry: >-
+          bash -c 'if git diff --name-only HEAD@{1} HEAD | grep -E "Dockerfile|docker-compose" > /dev/null; then echo "[POST-CHECKOUT WARNING] Docker configuration changed. Rebuild containers with docker compose build."; fi'
+        language: system
+        stages: [post-checkout]
+        always_run: true
+        pass_filenames: false
+
+  # ===========================================================================
+  # 7. PRE-PUSH – Heavy validation (tests, types, security, build)
+  # ===========================================================================
+  - repo: local
+    hooks:
+      - id: mypy
+        name: mypy (static type checking)
+        entry: >-
+          bash -c 'export PATH=".venv/bin:$PATH"; if [ -d src ] || [ -d app ]; then mypy --config-file=pyproject.toml src; else echo "[SKIP] mypy - No src/ or app/ directory found"; fi'
+        language: system
+        types: [python]
+        stages: [pre-push]
+        pass_filenames: false
+        verbose: true
+
+      - id: pytest
+        name: pytest (unit + integration)
+        entry: >-
+          bash -c 'export PATH=".venv/bin:$PATH"; export PYTHONPATH=src; if [ -d tests ]; then pytest -q --tb=short; else echo "[SKIP] pytest - No tests/ directory found"; fi'
+        language: system
+        types: [python]
+        stages: [pre-push]
+        pass_filenames: false
+        verbose: true
+
+      - id: bandit-full
+        name: Bandit (full security scan)
+        entry: >-
+          bash -c 'export PATH=".venv/bin:$PATH"; if [ -d src ] || [ -d app ]; then bandit -r src -c pyproject.toml -ll; else echo "[SKIP] bandit-full - No src/ or app/ directory found"; fi'
+        language: system
+        types: [python]
+        stages: [pre-push]
+        pass_filenames: false
+        verbose: true
+
+      - id: semgrep
+        name: Semgrep security rules
+        entry: >-
+          bash -c 'export PATH=".venv/bin:$PATH"; if command -v semgrep >/dev/null 2>&1 && ([ -d src ] || [ -d app ]); then semgrep --config=auto --error src; else echo "[SKIP] semgrep - semgrep not found or no src/ directory"; fi'
+        language: system
+        stages: [pre-push]
+        pass_filenames: false
+        verbose: true
+
+      - id: hadolint
+        name: Hadolint (Dockerfile)
+        entry: hadolint
+        language: system
+        stages: [pre-push]
+        files: Dockerfile.*
+        pass_filenames: true
+        args: ["--ignore", "DL3008"]
+
+      - id: docker-build
+        name: Docker build validation
+        entry: >-
+          bash -c 'if [ -s Dockerfile ] && docker info >/dev/null 2>&1; then docker build -t ai-saas:pre-push-check .; else echo "[SKIP] docker-build - Dockerfile empty or Docker daemon not available"; fi'
+        language: system
+        stages: [pre-push]
+        pass_filenames: false
+        verbose: true
+
+      - id: pip-audit
+        name: pip-audit (dependency vulnerabilities)
+        entry: >-
+          bash -c 'export PATH=".venv/bin:$PATH"; if command -v pip-audit >/dev/null 2>&1 && ([ -f requirements.txt ] || [ -f pyproject.toml ]); then pip-audit --strict; else echo "[SKIP] pip-audit - pip-audit not found or no dependency files"; fi'
+        language: system
+        stages: [pre-push]
+        pass_filenames: false
+        verbose: true
+
+      - id: openapi-check
+        name: OpenAPI schema validation
+        entry: >-
+          bash -c 'export PATH=".venv/bin:$PATH"; export PYTHONPATH=src; if [ -f src/ai_rag/main.py ]; then python -c "from ai_rag.main import app; schema = app.openapi(); assert \"openapi\" in schema; print(\"OpenAPI schema OK\")"; else echo "[SKIP] openapi-check - src/ai_rag/main.py not found"; fi'
+        language: system
+        stages: [pre-push]
+        pass_filenames: false
+        verbose: true

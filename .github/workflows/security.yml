@@ -1,0 +1,276 @@
+# .github/workflows/security.yml
+#
+# Production-grade Security & SAST workflow implementing:
+# - Secret leak detection (Gitleaks + TruffleHog)
+# - Python Static Application Security Testing (Bandit AST + Semgrep)
+# - Dependency vulnerability scanning (Google OSV-Scanner + pip-audit)
+# - Dockerfile security & best-practices linting (Hadolint)
+# - GitHub Actions workflow security auditing (zizmor)
+# - Filesystem vulnerability & misconfiguration scanning (Trivy FS)
+# - Supply-chain security health assessment (OpenSSF Scorecard)
+#
+# All `uses:` references are pinned to immutable 40-character commit SHAs
+# with the human-readable version as a trailing comment so Dependabot can
+# still propose upgrades. Format:  uses: <repo>@<40-char-sha> # <version>
+#
+# NOTE: `google/osv-scanner-action` is a SPECIAL CASE — its root `action.yml`
+# is metadata only (no `runs:` block). The real action lives in the
+# `osv-scanner-action/` subdirectory, and Google officially recommends
+# consuming it as a *reusable workflow*:
+#   uses: google/osv-scanner-action/.github/workflows/osv-scanner-reusable.yml@<ver>
+# That's the form used below (instead of `uses: google/osv-scanner-action@<ver>`,
+# which errors out with "Top level 'runs:' section is required").
+
+name: Security
+
+on:
+  push:
+    branches:
+      - main
+      - dev
+      - 'feature/**'
+      - 'bugfix/**'
+      - 'hotfix/**'
+      - 'refactor/**'
+      - 'chore/**'
+  pull_request:
+    branches:
+      - main
+      - dev
+    types:
+      - opened
+      - synchronize
+      - reopened
+      - ready_for_review
+  schedule:
+    - cron: '0 3 * * 1' # Weekly Monday 03:00 UTC
+  workflow_dispatch:
+
+# Least-privilege top-level permission default.
+permissions:
+  contents: read
+
+concurrency:
+  group: security-${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+defaults:
+  run:
+    shell: bash
+
+env:
+  PYTHON_VERSION: '3.14'
+
+jobs:
+  # =========================================================================
+  # 1. Secret & Credential Leak Detection
+  # =========================================================================
+  secret-detection:
+    name: Secret Detection (Gitleaks + TruffleHog)
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Scan Repository for Secrets (Gitleaks)
+        uses: gitleaks/gitleaks-action@e0c47f4f8be36e29cdc102c57e68cb5cbf0e8d1e # v3.0.0
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GITLEAKS_ENABLE_UPLOAD_ARTIFACT: 'false'
+
+      - name: Scan Repository for Secrets (TruffleHog)
+        uses: trufflesecurity/trufflehog@bcfcf73aaf4759d4dadc2783177c245a02792318 # v3.97.0
+        with:
+          path: ./
+          base: ${{ github.event.repository.default_branch }}
+          head: HEAD
+          extra_args: --debug --only-verified
+
+  # =========================================================================
+  # 2. Python SAST (Bandit + Semgrep)
+  # =========================================================================
+  python-sast:
+    name: Python SAST (Bandit + Semgrep)
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Set up Python
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          cache: pip
+
+      - name: Run Bandit AST Security Scan
+        run: |
+          pip install --upgrade pip bandit[toml]
+          if [ -f pyproject.toml ]; then
+            bandit -r . -c pyproject.toml -x ./.git,./.venv,./venv,./tests -ll || \
+            bandit -r . -x ./.git,./.venv,./venv,./tests -ll
+          else
+            bandit -r . -x ./.git,./.venv,./venv,./tests -ll
+          fi
+
+      - name: Run Semgrep SAST
+        run: |
+          docker run --rm \
+            -v "${{ github.workspace }}:/src" \
+            -w /src \
+            semgrep/semgrep:latest \
+            semgrep scan \
+              --config=p/security-audit \
+              --config=p/secrets \
+              --config=p/owasp-top-ten \
+              --config=p/python \
+              --error
+
+  # =========================================================================
+  # 3. Dependency Vulnerability Audits (OSV-Scanner + pip-audit)
+  #
+  # OSV-Scanner is now invoked as a *reusable workflow*. The reusable workflow
+  # declares the permissions it needs (actions: read, contents: read,
+  # security-events: write), so we pre-declare them on the calling job to
+  # satisfy GITHUB_TOKEN scoping. Inputs (scan-args, fail-on-vuln, etc.) are
+  # passed via the `with:` block of the `uses:` step.
+  # =========================================================================
+  dependency-vulnerability-scan:
+    name: Dependency CVE Scan (OSV-Scanner + pip-audit)
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: read
+      security-events: write
+      actions: read
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Run Google OSV-Scanner (reusable workflow)
+        uses: google/osv-scanner-action/.github/workflows/osv-scanner-reusable.yml@6e4298ebc4db23e847df9b2e2de2939d6f066c67 # v2.5.1
+        with:
+          scan-args: |-
+            --skip-git
+            ./
+          fail-on-vuln: false
+          upload-sarif: true
+
+      - name: Run pip-audit
+        run: |
+          pip install --upgrade pip pip-audit
+          if [ -f requirements.txt ]; then
+            pip-audit -r requirements.txt
+          elif [ -f pyproject.toml ]; then
+            pip-audit
+          else
+            echo "No requirements file or pyproject.toml found for pip-audit."
+          fi
+
+  # =========================================================================
+  # 4. Dockerfile & Workflow Security (Hadolint + zizmor)
+  # =========================================================================
+  dockerfile-and-workflow-audit:
+    name: Dockerfile & Workflow Security (Hadolint + zizmor)
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Lint Dockerfile (Hadolint)
+        if: ${{ hashFiles('Dockerfile', 'Dockerfile.*') != '' }}
+        uses: hadolint/hadolint-action@2a66e89f53d0771bb131a7fa31f3136336094aa6 # v3.4.0
+        with:
+          dockerfile: Dockerfile
+          failure-threshold: warning
+
+      - name: Set up Python for zizmor
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+
+      - name: Run zizmor Workflow Security Audit
+        run: |
+          pip install --upgrade pip zizmor
+          zizmor . || echo "zizmor scan completed with warnings."
+
+  # =========================================================================
+  # 5. Filesystem & Misconfiguration Scan (Trivy FS)
+  # =========================================================================
+  filesystem-misconfig-scan:
+    name: Filesystem & Misconfiguration Scan (Trivy)
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: read
+      security-events: write
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Run Trivy Filesystem Scan
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
+        with:
+          scan-type: fs
+          scan-ref: .
+          format: sarif
+          output: trivy-fs-results.sarif
+          severity: CRITICAL,HIGH
+          exit-code: '0'
+
+      - name: Upload Trivy FS SARIF Report
+        if: always()
+        uses: github/codeql-action/upload-sarif@db488ddef3bf6cb639b32c2e9a7c0a7ea8271d28 # v4.37.8
+        with:
+          sarif_file: trivy-fs-results.sarif
+          category: trivy-filesystem
+
+  # =========================================================================
+  # 6. Supply Chain Security Health Assessment (OpenSSF Scorecard)
+  # =========================================================================
+  scorecard-analysis:
+    name: Supply Chain Scorecard (OpenSSF)
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: read
+      security-events: write
+      id-token: write
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Run OpenSSF Scorecard Analysis
+        uses: ossf/scorecard-action@4eaacf0543bb3f2c246792bd56e8cdeffafb205a # v2.4.3
+        with:
+          results_file: scorecard-results.sarif
+          results_format: sarif
+          publish_results: true
+
+      - name: Upload Scorecard SARIF Report
+        if: always()
+        uses: github/codeql-action/upload-sarif@db488ddef3bf6cb639b32c2e9a7c0a7ea8271d28 # v4.37.8
+        with:
+          sarif_file: scorecard-results.sarif
+          category: openssf-scorecard

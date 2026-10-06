@@ -1,0 +1,69 @@
+# .github/workflows/codeql.yml
+#
+# Production-grade GitHub CodeQL Static Application Security Testing (SAST)
+# Performs semantic dataflow and taint-tracking analysis on Python code.
+#
+# All `uses:` references are pinned to immutable 40-character commit SHAs
+# with the human-readable version as a trailing comment so Dependabot can
+# still propose upgrades. Format:  uses: <repo>@<40-char-sha> # <version>
+#
+# Permissions rationale:
+# - contents: read       -> Clone and parse repository source code
+# - security-events: write -> Upload SARIF analysis results to GitHub Security Tab
+# - actions: read        -> Required for CodeQL analysis on private repositories
+
+name: CodeQL
+
+on:
+  push:
+    branches:
+      - main
+      - dev
+  pull_request:
+    branches:
+      - main
+      - dev
+    types:
+      - opened
+      - synchronize
+      - reopened
+  schedule:
+    - cron: '23 4 * * 1' # Weekly Monday 04:23 UTC
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: codeql-${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  analyze:
+    name: CodeQL SAST Analysis (Python)
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    permissions:
+      contents: read
+      security-events: write
+      actions: read
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Initialize CodeQL
+        uses: github/codeql-action/init@db488ddef3bf6cb639b32c2e9a7c0a7ea8271d28 # v4.37.8
+        with:
+          languages: python
+          queries: security-extended
+
+      - name: Autobuild CodeQL
+        uses: github/codeql-action/autobuild@db488ddef3bf6cb639b32c2e9a7c0a7ea8271d28 # v4.37.8
+
+      - name: Perform CodeQL Analysis
+        uses: github/codeql-action/analyze@db488ddef3bf6cb639b32c2e9a7c0a7ea8271d28 # v4.37.8
+        with:
+          category: /language:python

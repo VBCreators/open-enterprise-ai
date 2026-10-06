@@ -1,7 +1,7 @@
 [project]
 name = "open-enterprise-ai"
 version = "0.1.0"
-description = "Add your description here"
+description = "An open-source enterprise AI harness to manage, secure, and deploy AI access across your teams with provider-agnostic support for any LLM."
 readme = "README.md"
 authors = [
     { name = "Vrushali Kulkarni", email = "vrushali.kulkarni.official@gmail.com" }
@@ -15,3 +15,8 @@ open-enterprise-ai = "open_enterprise_ai:main"
 [build-system]
 requires = ["uv_build>=0.12.5,<0.13.0"]
 build-backend = "uv_build"
+
+[dependency-groups]
+dev = [
+    "pre-commit>=4.6.2",
+]

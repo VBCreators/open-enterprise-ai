@@ -1,0 +1,45 @@
+{
+  $schema: "https://docs.renovatebot.com/renovate-schema.json",
+
+  extends: [
+    "config:recommended",
+    ":pinDigestsDisabled",
+    "helpers:pinGitHubActionDigests",
+  ],
+
+  // All times in IST (UTC+5:30) — no DST in India, so this is stable year-round
+  timezone: "Asia/Kolkata",
+  schedule: ["before 4am on monday"],
+
+  // Keeps uv.lock transitive deps fresh — runs on the same weekly schedule
+  lockFileMaintenance: {
+    enabled: true,
+  },
+
+  prConcurrentLimit: 10,
+
+  packageRules: [
+    {
+      // catch-all: minors + patches grouped into one weekly PR
+      matchUpdateTypes: ["minor", "patch"],
+      groupName: "all non-major dependencies",
+    },
+    {
+      // CI changes get their own reviewable PRs (overrides the catch-all group)
+      matchManagers: ["github-actions"],
+      groupName: "github-actions",
+    },
+    {
+      // pin base image digests for supply-chain hygiene
+      matchManagers: ["dockerfile", "docker-compose"],
+      pinDigests: true,
+    },
+    {
+      matchPackageNames: [
+      "langchain", "langchain-*", "langgraph", "langgraph-*",
+      "langsmith", "langfuse", "deepagents",
+    ],
+    groupName: "langchain ecosystem",
+    },
+  ],
+}
