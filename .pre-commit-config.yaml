@@ -198,7 +198,7 @@ repos:
       - id: openapi-check
         name: OpenAPI schema validation
         entry: >-
-          bash -c 'export PATH=".venv/bin:$PATH"; export PYTHONPATH=src; if [ -f src/ai_rag/main.py ]; then python -c "from ai_rag.main import app; schema = app.openapi(); assert \"openapi\" in schema; print(\"OpenAPI schema OK\")"; else echo "[SKIP] openapi-check - src/ai_rag/main.py not found"; fi'
+          bash -c 'export PATH=".venv/bin:$PATH"; export PYTHONPATH=src; if [ -f src/open_enterprise_ai/main.py ]; then python -c "from open_enterprise_ai.main import app; schema = app.openapi(); assert \"openapi\" in schema; print(\"OpenAPI schema OK\")"; else echo "[SKIP] openapi-check - src/open_enterprise_ai/main.py not found"; fi'
         language: system
         stages: [pre-push]
         pass_filenames: false

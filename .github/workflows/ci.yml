@@ -165,12 +165,12 @@ jobs:
         run: |
           python -c "
           try:
-              from ai_rag.main import app
+              from open_enterprise_ai.main import app
               schema = app.openapi()
               assert 'openapi' in schema, 'Invalid OpenAPI schema generated'
               print('[OK] FastAPI OpenAPI schema validated successfully')
           except (ImportError, ModuleNotFoundError) as err:
-              print(f'[ERROR] Failed to load ai_rag.main: {err}')
+              print(f'[ERROR] Failed to load open_enterprise_ai.main: {err}')
               exit(1)
           "
 
@@ -180,7 +180,7 @@ jobs:
           if [ -d "tests/unit" ] && [ -n "$(find tests/unit -name '*.py' -not -name '__init__.py' -print -quit)" ]; then
             pytest tests/unit \
               --junitxml=test-results/unit-junit.xml \
-              --cov=ai_rag \
+              --cov=open_enterprise_ai \
               --cov-report=xml:coverage-results/coverage-unit.xml \
               --cov-report=term-missing \
               -v
@@ -235,7 +235,7 @@ jobs:
           if [ -d "tests/integration" ] && [ -n "$(find tests/integration -name '*.py' -not -name '__init__.py' -print -quit)" ]; then
             pytest tests/integration \
               --junitxml=test-results/integration-junit.xml \
-              --cov=ai_rag \
+              --cov=open_enterprise_ai \
               --cov-report=xml:coverage-results/coverage-int.xml \
               --cov-report=term-missing \
               -v
