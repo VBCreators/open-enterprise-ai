@@ -7,7 +7,9 @@ authors = [
     { name = "Vrushali Kulkarni", email = "vrushali.kulkarni.official@gmail.com" }
 ]
 requires-python = ">=3.14"
-dependencies = []
+dependencies = [
+    "fastapi>=0.142.2",
+]
 
 [project.scripts]
 open-enterprise-ai = "open_enterprise_ai:main"
@@ -18,5 +20,10 @@ build-backend = "uv_build"
 
 [dependency-groups]
 dev = [
+    "bandit[toml]>=1.9.4",
+    "mypy>=2.4.0",
+    "pip-audit>=2.10.1",
     "pre-commit>=4.6.2",
+    "pytest>=9.1.1",
+    "ruff>=0.16.10",
 ]

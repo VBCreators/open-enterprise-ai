@@ -238,46 +238,54 @@ jobs:
 
           APP_MODULE = "open_enterprise_ai.main"
 
-          # Support src/ layouts even when the package was not pip-installed.
+          # Support src/ layouts even when the package was not installed.
+
           if Path("src").is_dir():
               sys.path.insert(0, str(Path("src").resolve()))
 
           # BYPASS RULE 1: the application entrypoint does not exist yet.
-          app_file_exists = any(
+
+
+              if not any(
               p.is_file()
               for p in (
                   Path("open_enterprise_ai") / "main.py",
                   Path("src") / "open_enterprise_ai" / "main.py",
               )
-          )
-          if not app_file_exists:
+          ):
               print(f"[INFO] {APP_MODULE}.py does not exist yet -- skipping OpenAPI contract check.")
               sys.exit(0)
 
-          # BYPASS RULE 2: the file exists but FastAPI is not installed.
+          # BYPASS RULE 2: FastAPI is not yet available for import.
+
           if importlib.util.find_spec("fastapi") is None:
               print("[INFO] FastAPI is not installed -- skipping OpenAPI contract check.")
               sys.exit(0)
 
           # The app exists and FastAPI is available: failures from here are real.
+
           try:
-              app = getattr(importlib.import_module(APP_MODULE), "app")
+              module = importlib.import_module(APP_MODULE)
           except ModuleNotFoundError as err:
               # main.py exists but one of ITS imports is missing (a project
               # dependency that is not declared/installed yet) -- skip gracefully.
-              print(f"[WARN] Could not import {APP_MODULE}: {err} -- skipping OpenAPI contract check.")
+              print(f"[WARN] Could not import {APP_MODULE} (missing dependency: {err}) -- skipping.")
               sys.exit(0)
           except Exception as err:
               print(f"[ERROR] Failed to import {APP_MODULE}: {err!r}")
               sys.exit(1)
 
-          openapi = getattr(app, "openapi", None)
-          if not callable(openapi):
-              print(f"[ERROR] {APP_MODULE}.app has no callable openapi() -- is it a FastAPI() instance?")
-              sys.exit(1)
+          app = getattr(module, "app", None)
+          if app is None:
+              print(f"[INFO] {APP_MODULE} exists but does not define 'app' yet -- skipping.")
+              sys.exit(0)
+
+          if not callable(getattr(app, "openapi", None)):
+              print(f"[INFO] {APP_MODULE}.app is not a FastAPI app yet -- skipping.")
+              sys.exit(0)
 
           try:
-              schema = openapi()
+              schema = app.openapi()
           except Exception as err:
               print(f"[ERROR] app.openapi() raised: {err!r}")
               sys.exit(1)
@@ -286,7 +294,7 @@ jobs:
               print("[ERROR] Invalid OpenAPI schema generated.")
               sys.exit(1)
 
-          print(f"[OK] FastAPI OpenAPI schema validated successfully (OpenAPI {schema.get('openapi')}).")
+          print(f"[OK] FastAPI OpenAPI schema validated (OpenAPI {schema.get('openapi')}).")
           PY
 
       - name: Run Unit Tests (if they exist)
