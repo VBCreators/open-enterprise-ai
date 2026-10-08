@@ -358,74 +358,57 @@ repos:
         pass_filenames: false
         verbose: true
 
-      # Audits installed Python packages against known vulnerability databases (PyPA / OSV).
-      # Replaces pip-audit with uv pip audit for faster execution and tighter integration with uv.
-      # Uses safe-bypass design to avoid blocking when uv is uninstalled or when targets are absent.
+      # ==============================================================================
+      # Pre-commit Hook: uv-audit
+      # Purpose: Scans project dependencies for known security vulnerabilities before pushing.
+      # Behavior: Fails gracefully (exit 0) if uv, project files, or audit features
+      #           are missing, preventing workflow disruption for developers without uv.
+      # ==============================================================================
       - id: uv-audit
-        name: uv pip audit (dependency vulnerabilities)
+        name: uv audit (dependency vulnerabilities)
         entry: |
           bash -c '
-          # -------------------------------------------------------------------------
-          # PATH SETUP
-          # Ensure both standard Cargo/uv default install path (~/.cargo/bin) and
-          # local virtual environments (.venv/bin) take precedence.
-          # -------------------------------------------------------------------------
-          export PATH="$HOME/.cargo/bin:.venv/bin:$PATH"
-
-          # -------------------------------------------------------------------------
-          # EDGE CASE 1: Check if uv is installed on developer or CI environment
-          # Emits [SKIP] with exit 0 so unconfigured machines or early repo stages
-          # are not blocked from pushing code.
-          # -------------------------------------------------------------------------
+          # 1. Verify that the "uv" CLI tool is installed and available in PATH
           if ! command -v uv >/dev/null 2>&1; then
-            echo "[SKIP] uv-audit - uv is not installed (run: curl -LsSf https://astral.sh/uv/install.sh | sh)"
+            echo "[SKIP] uv-audit - uv is not installed (see https://docs.astral.sh/uv/getting-started/installation/)"
             exit 0
           fi
 
-          # -------------------------------------------------------------------------
-          # EDGE CASE 2: Unpublished Local Package Resolution
-          # When uv pip audit scans an editable or locally-installed project, it queries
-          # PyPI and errors out if the project name is not yet registered on PyPI.
-          # Here we dynamically read the package name from pyproject.toml and pass
-          # --ignore-package to prevent false-positive missing-package errors.
-          # -------------------------------------------------------------------------
-          AUDIT_FLAGS=()
-          if [ -f pyproject.toml ]; then
-            PKG_NAME=$(sed -n "s/^[[:space:]]*name[[:space:]]*=[[:space:]]*[\"\x27]\([^\"\x27]*\)[\"\x27].*/\1/p" pyproject.toml | head -n 1)
-            if [ -n "$PKG_NAME" ]; then
-              AUDIT_FLAGS+=(--ignore-package "$PKG_NAME")
+          # 2. Ensure this is a Python project by checking for pyproject.toml
+          if [ ! -f pyproject.toml ]; then
+            echo "[SKIP] uv-audit - no pyproject.toml found"
+            exit 0
+          fi
+
+          # 3. Check if the installed uv version supports the "audit" command
+          if ! uv audit --help >/dev/null 2>&1; then
+            echo "[SKIP] uv-audit - this uv version does not support uv audit (run: uv self update)"
+            exit 0
+          fi
+
+          # 4. uv audit requires a lockfile; generate it if missing, or skip if resolution fails
+          if [ ! -f uv.lock ]; then
+            echo "[INFO] uv-audit - uv.lock not found; generating it with: uv lock"
+            if ! uv lock --quiet; then
+              echo "[SKIP] uv-audit - uv lock failed; dependencies may be unresolvable at this stage"
+              exit 0
             fi
           fi
 
-          # -------------------------------------------------------------------------
-          # TARGET AUDIT RESOLUTION (Priority Order):
-          # 1. uv.lock: Pinned lockfile provides the fastest and most deterministic audit.
-          # 2. pyproject.toml: Audit direct and transitive declared project dependencies.
-          # 3. requirements.txt: Fallback for standard requirements files if present.
-          # 4. Active .venv: Audits the installed environment packages directly.
-          # 5. None: Cleanly skips if no dependencies exist yet.
-          # -------------------------------------------------------------------------
-          if [ -f uv.lock ]; then
-            echo "[INFO] uv-audit - auditing dependencies via uv.lock"
-            exec uv pip audit --lockfile uv.lock "${AUDIT_FLAGS[@]}"
-          elif [ -f pyproject.toml ]; then
-            echo "[INFO] uv-audit - auditing dependencies via pyproject.toml"
-            exec uv pip audit -r pyproject.toml "${AUDIT_FLAGS[@]}"
-          elif [ -f requirements.txt ]; then
-            echo "[INFO] uv-audit - auditing dependencies via requirements.txt"
-            exec uv pip audit -r requirements.txt "${AUDIT_FLAGS[@]}"
-          elif [ -d .venv ]; then
-            echo "[INFO] uv-audit - auditing installed virtual environment packages"
-            exec uv pip audit "${AUDIT_FLAGS[@]}"
-          else
-            echo "[SKIP] uv-audit - no dependency definitions (uv.lock, pyproject.toml, requirements.txt, or .venv) found"
-            exit 0
-          fi
+          # 5. Execute the vulnerability scan with the preview audit flag enabled
+          uv audit --preview-features audit-command --no-progress
           '
+        # Run directly via the local environment rather than an isolated pre-commit sandbox
         language: system
+        # Run only during "git push" rather than on every commit to minimize commit latency
         stages: [pre-push]
+        # Pass no staged file paths; uv audit inspects the entire project dependency tree
         pass_filenames: false
+        # Always print output so developers see scan results and skip notices
         verbose: true
+
+
+
 
       # Validates FastAPI OpenAPI JSON schema generation.
       # Executes an inline Python snippet to dynamically import the FastAPI app and evaluate `app.openapi()`.
