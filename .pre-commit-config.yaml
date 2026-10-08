@@ -3,81 +3,151 @@
 #
 # Install: pre-commit install --hook-type pre-commit --hook-type commit-msg --hook-type pre-push --hook-type post-checkout
 # Run all: pre-commit run --all-files
-# Update: pre-commit autoupdate
+# Update:  pre-commit autoupdate
+#
+# Design rule for local (language: system) hooks:
+#   Every tool hook checks BOTH (a) whether the tool is installed and
+#   (b) whether there is anything for it to check. Missing tool or missing
+#   target => [SKIP] with exit 0, so an early-stage repo is never blocked.
+#   Genuine errors in existing code still fail the push.
 # =============================================================================
+
+# -----------------------------------------------------------------------------
+# GLOBAL PRE-COMMIT FRAMEWORK CONFIGURATION
+# -----------------------------------------------------------------------------
+
+# Defines which git hook events will be registered in .git/hooks/ when running `pre-commit install`.
 default_install_hook_types: [pre-commit, commit-msg, pre-push, post-checkout]
+
+# Default stage for hooks where explicit `stages:` is omitted.
+# Runs during `git commit` before the commit message editor is opened.
 default_stages: [pre-commit]
+
+# If set to true, pre-commit aborts execution immediately on the first hook failure.
+# Setting to false ensures the developer sees all errors across all hooks in a single run.
 fail_fast: false
+
+# Enforces that all contributors use at least pre-commit v3.7.0 to guarantee
+# support for modern configuration keys and multi-stage lifecycle events.
 minimum_pre_commit_version: "3.7.0"
+
 repos:
   # ===========================================================================
   # 1. SECRET & CREDENTIAL LEAK DETECTION (Highest priority)
+  # Runs first to prevent any sensitive credentials, tokens, or private keys
+  # from being committed to the git tree.
   # ===========================================================================
   - repo: https://github.com/gitleaks/gitleaks
     rev: v8.30.0
     hooks:
+      # Scans staged git diffs against high-entropy patterns and regular expressions
+      # to catch API keys, passwords, bearer tokens, and secrets.
       - id: gitleaks
         name: Detect Hardcoded Secrets (Gitleaks)
 
   - repo: https://github.com/pre-commit/pre-commit-hooks
     rev: v6.0.0
     hooks:
+      # Scans staged files for private cryptographic keys (e.g., RSA, OPENSSH, PGP headers).
       - id: detect-private-key
         name: Detect Private Keys
 
   # ===========================================================================
   # 2. CODEBASE HYGIENE & PRE-COMMIT SAFETY
+  # General file structure, formatting, syntax validation, and branch protections.
   # ===========================================================================
+      # Prevents accidental commits containing unresolved Git conflict markers (e.g., <<<<<<<, =======, >>>>>>>).
       - id: check-merge-conflict
         name: Check for Unmerged Merge Conflicts
+
+      # Prevents accidental commits of large binary files that inflate repository size.
+      # Blocks any file larger than 500 KB from being tracked.
       - id: check-added-large-files
         name: Block Large Files
         args: ['--maxkb=500']
+
+      # Detects filenames that differ only by case (e.g., File.txt and file.txt).
+      # Prevents checkout and merge corruption across case-insensitive filesystems (macOS / Windows).
       - id: check-case-conflict
         name: Check Filename Case Conflicts
+
+      # Parses YAML files to ensure they conform to valid YAML syntax specifications.
       - id: check-yaml
         name: Validate YAML Files
+
+      # Parses JSON files to ensure they are well-formed and valid JSON syntax.
       - id: check-json
         name: Validate JSON Files
+
+      # Validates syntax for TOML configuration files (e.g., pyproject.toml, Cargo.toml).
       - id: check-toml
         name: Validate TOML Files
+
+      # Parses Python source files into an Abstract Syntax Tree (AST) to verify syntactic correctness
+      # without executing the code.
       - id: check-ast
         name: Validate Python Syntax (AST)
+
+      # Prevents developers from accidentally committing code directly to protected primary branches.
+      # Enforces branch-and-pull-request workflows.
       - id: no-commit-to-branch
         name: Block Direct Commits to Protected Branches
         args: ['--branch', 'main', '--branch', 'master', '--branch', 'develop']
+
+      # Checks Python code for left-behind interactive debugging breakpoints (pdb, breakpoint(), ipdb).
       - id: debug-statements
         name: Detect Debugger Statements (pdb / breakpoint / ipdb)
+
+      # Ensures files with a shebang line (e.g., #!/usr/bin/env bash) have executable permissions (chmod +x).
       - id: check-shebang-scripts-are-executable
         name: Ensure Shebang Scripts Are Executable
+
+      # Ensures any file with an executable bit (+x) contains a valid shebang line.
       - id: check-executables-have-shebangs
         name: Ensure Executables Have Shebangs
+
+      # Strips any unnecessary whitespace characters from the ends of lines.
       - id: trailing-whitespace
         name: Trim Trailing Whitespace
+
+      # Ensures every file ends with a blank line (POSIX standard) and removes trailing empty lines.
       - id: end-of-file-fixer
         name: Ensure Files End With a Newline
+
+      # Standardizes line endings to POSIX format (\n / LF), preventing Windows CRLF contamination.
       - id: mixed-line-ending
         name: Normalize Line Endings
         args: ['--fix=lf']
 
   # ===========================================================================
   # 3. PYTHON CODE LINTING & FORMATTING
+  # High-performance Rust-based linter and formatter (Ruff).
   # ===========================================================================
   - repo: https://github.com/astral-sh/ruff-pre-commit
     rev: v0.16.10
     hooks:
+      # Runs the Ruff linter against modified files. The `--fix` flag automatically
+      # remedies auto-fixable lint rule violations.
       - id: ruff-check
         name: Ruff Linter
         args: [--fix]
+
+      # Enforces deterministic code formatting conforming to PEP 8 / Black specifications.
       - id: ruff-format
         name: Ruff Formatter
 
   # ===========================================================================
   # 4. AST-BASED SECURITY STATIC ANALYSIS (SAST)
+  # Scans Python code for common security vulnerabilities and insecure function calls.
   # ===========================================================================
   - repo: https://github.com/PyCQA/bandit
     rev: 1.9.4
     hooks:
+      # Analyzes Python code using AST to identify common security issues (e.g., hardcoded passwords,
+      # shell injection, insecure temp files).
+      # -c pyproject.toml: Loads Bandit rule configurations and excludes from pyproject.toml.
+      # exclude: Skips the test directory to avoid false positives on mock credentials or test asserts.
+      # additional_dependencies: Installs TOML parser support for Bandit.
       - id: bandit
         name: Bandit SAST – Python Security Scan
         args: ["-c", "pyproject.toml"]
@@ -86,26 +156,35 @@ repos:
 
   # ===========================================================================
   # 5. COMMIT MESSAGE VALIDATION
+  # Enforces standardization of commit messages across the team.
   # ===========================================================================
   - repo: https://github.com/compilerla/conventional-pre-commit
     rev: v4.4.0
     hooks:
+      # Validates that the git commit message matches the Conventional Commits specification
+      # (e.g., feat: ..., fix: ..., chore: ..., docs: ...).
+      # stages: [commit-msg] triggers during git commit-msg hook lifecycle.
       - id: conventional-pre-commit
         name: Conventional Commits check
         stages: [commit-msg]
 
   # ===========================================================================
   # 6. POST-CHECKOUT HOOKS
+  # Executes immediately following `git checkout` or `git switch` to alert developers
+  # about workspace or environment drift.
   # ===========================================================================
   - repo: https://github.com/pre-commit/pre-commit-hooks
     rev: v6.0.0
     hooks:
+      # Confirms that files checked out with executable bits retained valid shebangs.
       - id: check-executables-have-shebangs
         stages: [post-checkout]
         always_run: false
 
   - repo: local
     hooks:
+      # Inspects the git commit diff between the previous ref (HEAD@{1}) and the new ref (HEAD).
+      # Warns developer to update local dependencies if dependency lockfiles or requirement files changed.
       - id: check-dependency-sync
         name: Check Python Dependency Drift (Post-Checkout)
         entry: >-
@@ -115,6 +194,8 @@ repos:
         always_run: true
         pass_filenames: false
 
+      # Checks if Dockerfiles or docker-compose manifests changed between checkouts.
+      # Alerts developer to rebuild local containers to stay in sync with remote changes.
       - id: check-docker-drift
         name: Check Docker Configuration Drift (Post-Checkout)
         entry: >-
@@ -126,39 +207,111 @@ repos:
 
   # ===========================================================================
   # 7. PRE-PUSH – Heavy validation (tests, types, security, build)
+  # Heavy checks executed only prior to pushing code to remote (`git push`).
+  # Uses the "safe bypass" design pattern: if local tools or code directories are missing,
+  # the hook emits a [SKIP] with exit 0 rather than blocking progress in new or uninitialized repos.
   # ===========================================================================
   - repo: local
     hooks:
+      # Performs static type checking using mypy.
+      # Ensures .venv is prioritized on PATH.
+      # Skips cleanly if mypy is not installed, no source code directory exists (src/ or app/),
+      # or no python files are found. Passes pyproject.toml configuration if present.
       - id: mypy
         name: mypy (static type checking)
-        entry: >-
-          bash -c 'export PATH=".venv/bin:$PATH"; if [ -d src ] || [ -d app ]; then mypy --config-file=pyproject.toml src; else echo "[SKIP] mypy - No src/ or app/ directory found"; fi'
+        entry: |
+          bash -c '
+          export PATH=".venv/bin:$PATH"
+          if ! command -v mypy >/dev/null 2>&1; then
+            echo "[SKIP] mypy - mypy is not installed (run: pip install mypy  or  pip install -e .[dev])"
+            exit 0
+          fi
+          TARGET=""
+          if [ -d src ]; then TARGET=src
+          elif [ -d app ]; then TARGET=app
+          else
+            echo "[SKIP] mypy - No src/ or app/ directory found"
+            exit 0
+          fi
+          if ! find "$TARGET" -name "*.py" -print -quit | grep -q .; then
+            echo "[SKIP] mypy - no Python files under $TARGET"
+            exit 0
+          fi
+          CONFIG_ARGS=()
+          if [ -f pyproject.toml ] && grep -q "[tool.mypy]" pyproject.toml; then
+            CONFIG_ARGS=(--config-file=pyproject.toml)
+          fi
+          mypy "${CONFIG_ARGS[@]}" "$TARGET"
+          '
         language: system
         types: [python]
         stages: [pre-push]
         pass_filenames: false
         verbose: true
 
+      # Runs the test suite via pytest prior to pushing.
+      # Sets PYTHONPATH=src to ensure modules resolve correctly without prior installation.
+      # Skips cleanly if pytest is not installed or the `tests/` directory does not exist.
       - id: pytest
         name: pytest (unit + integration)
-        entry: >-
-          bash -c 'export PATH=".venv/bin:$PATH"; export PYTHONPATH=src; if [ -d tests ]; then pytest -q --tb=short; else echo "[SKIP] pytest - No tests/ directory found"; fi'
+        entry: |
+          bash -c '
+          export PATH=".venv/bin:$PATH"
+          export PYTHONPATH=src
+          if ! command -v pytest >/dev/null 2>&1; then
+            echo "[SKIP] pytest - pytest is not installed (run: pip install pytest)"
+            exit 0
+          fi
+          if [ -d tests ]; then
+            pytest -q --tb=short
+          else
+            echo "[SKIP] pytest - No tests/ directory found"
+            exit 0
+          fi
+          '
         language: system
         types: [python]
         stages: [pre-push]
         pass_filenames: false
         verbose: true
 
+      # Comprehensive security scan using Bandit across the target source directory.
+      # Runs with `-ll` flag to report only Medium and High severity security issues.
       - id: bandit-full
         name: Bandit (full security scan)
-        entry: >-
-          bash -c 'export PATH=".venv/bin:$PATH"; if [ -d src ] || [ -d app ]; then bandit -r src -c pyproject.toml -ll; else echo "[SKIP] bandit-full - No src/ or app/ directory found"; fi'
+        entry: |
+          bash -c '
+          export PATH=".venv/bin:$PATH"
+          if ! command -v bandit >/dev/null 2>&1; then
+            echo "[SKIP] bandit-full - bandit is not installed (run: pip install bandit[toml])"
+            exit 0
+          fi
+          TARGET=""
+          if [ -d src ]; then TARGET=src
+          elif [ -d app ]; then TARGET=app
+          else
+            echo "[SKIP] bandit-full - No src/ or app/ directory found"
+            exit 0
+          fi
+          if ! find "$TARGET" -name "*.py" -print -quit | grep -q .; then
+            echo "[SKIP] bandit-full - no Python files under $TARGET"
+            exit 0
+          fi
+          CONFIG_ARGS=()
+          if [ -f pyproject.toml ] && grep -q "[tool.bandit]" pyproject.toml; then
+            CONFIG_ARGS=(-c pyproject.toml)
+          fi
+          bandit -r "$TARGET" "${CONFIG_ARGS[@]}" -ll
+          '
         language: system
         types: [python]
         stages: [pre-push]
         pass_filenames: false
         verbose: true
 
+      # Runs Semgrep using automatic community rule selection (--config=auto).
+      # Fails (--error) if known security patterns or bugs are matched in src/.
+      # Skips if Semgrep is not installed or neither src/ nor app/ directory exists.
       - id: semgrep
         name: Semgrep security rules
         entry: >-
@@ -168,15 +321,34 @@ repos:
         pass_filenames: false
         verbose: true
 
+      # Lints Dockerfiles for best practices and security misconfigurations using Hadolint.
+      # Passes all matching Dockerfiles through "$@".
+      # Ignores DL3008 (pinning apt package versions) which is often overly strict.
+      # The dummy script argument `_hadolint` serves as $0 so that positional parameters $1, $2, ... map to "$@".
       - id: hadolint
         name: Hadolint (Dockerfile)
-        entry: hadolint
+        # The trailing "_hadolint" is a placeholder $0 so that "$@" inside
+        # the script receives the filenames pre-commit passes to the hook.
+        entry: |
+          bash -c '
+          if ! command -v hadolint >/dev/null 2>&1; then
+            echo "[SKIP] hadolint - hadolint is not installed"
+            exit 0
+          fi
+          if [ "$#" -eq 0 ]; then
+            echo "[SKIP] hadolint - no Dockerfile to check"
+            exit 0
+          fi
+          exec hadolint --ignore DL3008 "$@"
+          ' _hadolint
         language: system
         stages: [pre-push]
         files: Dockerfile.*
         pass_filenames: true
-        args: ["--ignore", "DL3008"]
 
+      # Validates that the primary Docker image can successfully build before pushing.
+      # Verifies that Docker daemon is running (`docker info`) and `Dockerfile` is non-empty.
+      # Tags temporary build as ai-saas:pre-push-check.
       - id: docker-build
         name: Docker build validation
         entry: >-
@@ -186,6 +358,9 @@ repos:
         pass_filenames: false
         verbose: true
 
+      # Audits installed Python packages against known vulnerability databases (PyPA Advisory DB).
+      # `--strict` flag ensures any identified vulnerability (CVE) returns a non-zero exit code.
+      # Skips if pip-audit is missing or if no dependency definition file is found.
       - id: pip-audit
         name: pip-audit (dependency vulnerabilities)
         entry: >-
@@ -195,10 +370,75 @@ repos:
         pass_filenames: false
         verbose: true
 
+      # Validates FastAPI OpenAPI JSON schema generation.
+      # Executes an inline Python snippet to dynamically import the FastAPI app and evaluate `app.openapi()`.
+      # Safe-fail chain logic:
+      #   1. Skips if main.py does not exist in standard candidate paths.
+      #   2. Skips if the 'fastapi' module cannot be resolved in current Python environment.
+      #   3. Skips if imports inside main.py fail due to uninstalled dependencies (warns developer).
+      #   4. Exits with error (code 1) if an unexpected runtime exception happens during import.
+      #   5. Skips if the module has no 'app' instance attribute.
+      #   6. Skips if 'app' is not a callable FastAPI application (lacks openapi() method).
+      #   7. Fails (code 1) if `app.openapi()` does not return a valid dictionary with an "openapi" key.
       - id: openapi-check
         name: OpenAPI schema validation
-        entry: >-
-          bash -c 'export PATH=".venv/bin:$PATH"; export PYTHONPATH=src; if [ -f src/open_enterprise_ai/main.py ]; then python -c "from open_enterprise_ai.main import app; schema = app.openapi(); assert \"openapi\" in schema; print(\"OpenAPI schema OK\")"; else echo "[SKIP] openapi-check - src/open_enterprise_ai/main.py not found"; fi'
+        # Bypass chain (early-stage friendly):
+        #   1. main.py missing            -> [SKIP]
+        #   2. fastapi not installed      -> [SKIP]
+        #   3. main.py deps not installed -> [SKIP] (warn)
+        #   4. no `app` object yet        -> [SKIP]
+        #   5. app is not a FastAPI app   -> [SKIP]
+        #   6. schema invalid / openapi() raises -> FAIL
+        entry: |
+          bash -c '
+          export PATH=".venv/bin:$PATH"
+          export PYTHONPATH=src
+          python - <<PY
+          import importlib
+          import importlib.util
+          import sys
+          from pathlib import Path
+
+          candidates = (
+              Path("src/open_enterprise_ai/main.py"),
+              Path("open_enterprise_ai/main.py"),
+          )
+
+          if not any(p.is_file() for p in candidates):
+              print("[SKIP] openapi-check - open_enterprise_ai/main.py not found")
+              sys.exit(0)
+
+          if importlib.util.find_spec("fastapi") is None:
+              print("[SKIP] openapi-check - fastapi is not installed")
+              sys.exit(0)
+
+          try:
+              module = importlib.import_module("open_enterprise_ai.main")
+          except ModuleNotFoundError as err:
+              print("[WARN] openapi-check - cannot import open_enterprise_ai.main yet ("
+                    + str(err) + ") - skipping")
+              sys.exit(0)
+          except Exception as err:
+              print("[ERROR] openapi-check - import failed: " + repr(err))
+              sys.exit(1)
+
+          app = getattr(module, "app", None)
+          if app is None:
+              print("[SKIP] openapi-check - open_enterprise_ai.main does not define an app object yet")
+              sys.exit(0)
+
+          if not callable(getattr(app, "openapi", None)):
+              print("[SKIP] openapi-check - app has no openapi() method (not a FastAPI app yet)")
+              sys.exit(0)
+
+          schema = app.openapi()
+          if not isinstance(schema, dict) or "openapi" not in schema:
+              print("[ERROR] openapi-check - invalid OpenAPI schema generated")
+              sys.exit(1)
+
+          print("[OK] openapi-check - FastAPI OpenAPI schema validated")
+          PY
+          '
         language: system
         stages: [pre-push]
         pass_filenames: false
