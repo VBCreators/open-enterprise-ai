@@ -239,14 +239,11 @@ jobs:
           APP_MODULE = "open_enterprise_ai.main"
 
           # Support src/ layouts even when the package was not installed.
-
           if Path("src").is_dir():
               sys.path.insert(0, str(Path("src").resolve()))
 
           # BYPASS RULE 1: the application entrypoint does not exist yet.
-
-
-              if not any(
+          if not any(
               p.is_file()
               for p in (
                   Path("open_enterprise_ai") / "main.py",
@@ -257,13 +254,11 @@ jobs:
               sys.exit(0)
 
           # BYPASS RULE 2: FastAPI is not yet available for import.
-
           if importlib.util.find_spec("fastapi") is None:
               print("[INFO] FastAPI is not installed -- skipping OpenAPI contract check.")
               sys.exit(0)
 
           # The app exists and FastAPI is available: failures from here are real.
-
           try:
               module = importlib.import_module(APP_MODULE)
           except ModuleNotFoundError as err:
