@@ -144,6 +144,9 @@ jobs:
   # security-events: write), so we pre-declare them on the calling job to
   # satisfy GITHUB_TOKEN scoping. Inputs (scan-args, fail-on-vuln, etc.) are
   # passed via the `with:` block of the `uses:` step.
+  #
+  # fail-on-vuln: TRUE so the job actually gates the PR — a SARIF upload
+  # alone only produces a report, it does not block merging.
   # =========================================================================
   dependency-vulnerability-scan:
     name: Dependency CVE Scan (OSV-Scanner + pip-audit)
@@ -165,7 +168,7 @@ jobs:
           scan-args: |-
             --skip-git
             ./
-          fail-on-vuln: false
+          fail-on-vuln: true
           upload-sarif: true
 
       - name: Run pip-audit
@@ -181,6 +184,11 @@ jobs:
 
   # =========================================================================
   # 4. Dockerfile & Workflow Security (Hadolint + zizmor)
+  #
+  # The Hadolint `if` and `dockerfile` input are kept in sync: the step only
+  # runs when a root `Dockerfile` exists, and the input names that exact file.
+  # If you later add `Dockerfile.dev` / `Dockerfile.prod`, give them their own
+  # steps or convert this into a matrix strategy.
   # =========================================================================
   dockerfile-and-workflow-audit:
     name: Dockerfile & Workflow Security (Hadolint + zizmor)
@@ -195,7 +203,7 @@ jobs:
           persist-credentials: false
 
       - name: Lint Dockerfile (Hadolint)
-        if: ${{ hashFiles('Dockerfile', 'Dockerfile.*') != '' }}
+        if: ${{ hashFiles('Dockerfile') != '' }}
         uses: hadolint/hadolint-action@2a66e89f53d0771bb131a7fa31f3136336094aa6 # v3.4.0
         with:
           dockerfile: Dockerfile
@@ -206,10 +214,12 @@ jobs:
         with:
           python-version: ${{ env.PYTHON_VERSION }}
 
+      # zizmor is run WITHOUT a `|| echo` fallback so a non-zero exit (any
+      # finding) propagates as a failed step and blocks the PR.
       - name: Run zizmor Workflow Security Audit
         run: |
           pip install --upgrade pip zizmor
-          zizmor . || echo "zizmor scan completed with warnings."
+          zizmor .
 
   # =========================================================================
   # 5. Filesystem & Misconfiguration Scan (Trivy FS)
