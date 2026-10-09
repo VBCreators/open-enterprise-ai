@@ -33,6 +33,20 @@ on:
       - 'feature/**'
       - 'bugfix/**'
       - 'hotfix/**'
+    # -----------------------------------------------------------------
+    # `type=semver` in the metadata step requires a tag-push trigger to
+    # fire. Without this, the semver tag rule is unreachable and the
+    # release flow silently breaks.
+    #
+    # Patterns:
+    #     - v   1.2.3         -> stable release
+    #     - v1.2.3-rc.1    -> pre-release (matches semver pre-release suffix)
+    # -----------------------------------------------------------------
+    tags:
+      - 'v*.*.*'
+      - 'v*.*.*-rc.*'
+      - 'v*.*.*-alpha.*'
+      - 'v*.*.*-beta.*'
   pull_request:
     branches:
       - main
@@ -109,11 +123,14 @@ jobs:
           fi
 
       # ---------------------------------------------------------------------
-      # Fix: removed direct `${{ github.* }}` interpolation inside `run:` —
-      # that is a shell-injection vector (semgrep `run-shell-injection`).
-      # Instead we pass values through `env:` — GitHub sets these env vars
-      # via a safe API, so any shell metacharacters in the value are
-      # properly quoted instead of being pasted raw into the script.
+      # Determine whether the current trigger is allowed to publish to a
+      # registry. Keep all values in `env:` to avoid shell-injection
+      # (semgrep `run-shell-injection`) — GitHub sets these env vars via
+      # a safe API instead of pasting them raw into the script.
+      #
+      #
+      #   Release pushes (refs/tags/vX.Y.Z) must also be authorized, otherwise the
+      #   configured semver tag is never published.
       # ---------------------------------------------------------------------
       - name: Determine if Push is Authorized
         id: auth_check
@@ -122,11 +139,18 @@ jobs:
           EVENT_NAME: ${{ github.event_name }}
           GITHUB_REF: ${{ github.ref }}
         run: |
-          if [ "${EVENT_NAME}" = "push" ] && { [ "${GITHUB_REF}" = "refs/heads/main" ] || [ "${GITHUB_REF}" = "refs/heads/dev" ]; }; then
-            echo "push_enabled=true" >> "$GITHUB_OUTPUT"
-          else
-            echo "push_enabled=false" >> "$GITHUB_OUTPUT"
+          push_enabled="false"
+
+          if [ "${EVENT_NAME}" = "push" ]; then
+            case "${GITHUB_REF}" in
+              refs/heads/main|refs/heads/dev|refs/tags/v*)
+                push_enabled="true"
+                ;;
+            esac
           fi
+
+          echo "push_enabled=${push_enabled}" >> "$GITHUB_OUTPUT"
+          echo "auth_check: EVENT_NAME=${EVENT_NAME} REF=${GITHUB_REF} push_enabled=${push_enabled}"
 
       # ---------------------------------------------------------------------
       # Configure tags for BOTH registries.
@@ -149,6 +173,11 @@ jobs:
       # scanners (Trivy, Grype, Dockle, SBOM) and the Cosign signature
       # therefore continue to target GHCR — no collateral changes there.
       # Docker Hub just gets a parallel push as a side effect of the build.
+      #
+      # Note on `type=semver`: this rule activates only when the workflow
+      # runs from a tag push matching vX.Y.Z. With the tag trigger now
+      # wired up in `on.push.tags`, this rule actually fires for the
+      # first time on releases.
       # ---------------------------------------------------------------------
       - name: Configure Docker Metadata & Tags
         id: meta
@@ -244,6 +273,11 @@ jobs:
           sarif_file: trivy-container-results.sarif
           category: trivy-container
 
+      # ---------------------------------------------------------------------
+      # emit a SARIF report and upload it under a distinct category
+      # (`grype-container`) so it shows up alongside Trivy in Code
+      # Scanning without merging or overwriting Trivy's category.
+      # ---------------------------------------------------------------------
       - name: Second-Opinion Vulnerability Scan (Grype)
         if: steps.dockerfile_check.outputs.is_buildable == 'true'
         continue-on-error: true
@@ -251,7 +285,15 @@ jobs:
         with:
           image: ${{ steps.image_ref.outputs.image_ref }}
           fail-build: false
-          output-format: table
+          output-format: sarif
+          output-file: grype-container-results.sarif
+
+      - name: Upload Grype Container SARIF Report
+        if: always() && steps.dockerfile_check.outputs.is_buildable == 'true' && hashFiles('grype-container-results.sarif') != ''
+        uses: github/codeql-action/upload-sarif@db488ddef3bf6cb639b32c2e9a7c0a7ea8271d28 # v4.37.8
+        with:
+          sarif_file: grype-container-results.sarif
+          category: grype-container
 
       - name: CIS Docker Benchmark Compliance Check (Dockle)
         if: steps.dockerfile_check.outputs.is_buildable == 'true'
