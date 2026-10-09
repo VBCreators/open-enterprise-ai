@@ -139,7 +139,7 @@ jobs:
           # Nothing to type-check yet? Skip instead of erroring.
           PY_COUNT=$(find . -type f -name '*.py' \
             -not -path './.git/*' \
-            -not -path './.venv/*' -not -path './venv/*' -not -path './.uv/*' \
+            -not -path './.venv/*' -not -path 'venv/*' -not -path './.uv/*' \
             -not -path './node_modules/*' \
             -not -path './build/*' -not -path './dist/*' \
             -not -path './.mypy_cache/*' -not -path './.ruff_cache/*' \
@@ -214,13 +214,43 @@ jobs:
               sys.exit(0)
 
           # The app exists and FastAPI is available: failures from here are real.
+          #
+          # Known-optional third-party packages. If one of these is missing
+          # from the environment, it's a legitimate "skip" -- the app is
+          # intentionally tolerant of them being absent. Keep this list small,
+          # explicit, and reviewed. NEVER add internal project modules here:
+          # a missing internal module means a broken app and must fail CI.
+          OPTIONAL_IMPORTS = {
+              "openai",
+              "anthropic",
+              "langchain_community",
+              "langchain_openai",
+              "pinecone",
+              "qdrant_client",
+              "weaviate",
+          }
+
           try:
               module = importlib.import_module(APP_MODULE)
           except ModuleNotFoundError as err:
-              # main.py exists but one of ITS imports is missing (a project
-              # dependency that is not declared/installed yet) -- skip gracefully.
-              print(f"[WARN] Could not import {APP_MODULE} (missing dependency: {err}) -- skipping.")
-              sys.exit(0)
+              missing = err.name or ""
+              # Normalize submodules to their top-level package so the
+              # allow-list stays flat (e.g. "langchain_community.embeddings"
+              # -> "langchain_community").
+              top_level = missing.split(".")[0] if missing else ""
+              if top_level in OPTIONAL_IMPORTS:
+                  print(
+                      f"[WARN] {APP_MODULE} skipped optional dependency: {missing!r} "
+                      f"(in OPTIONAL_IMPORTS allow-list)."
+                  )
+                  sys.exit(0)
+              # Anything else -- internal project modules, declared deps,
+              # typos -- is a REAL failure and must fail the job.
+              print(
+                  f"[ERROR] {APP_MODULE} requires missing module {missing!r} "
+                  f"(not in OPTIONAL_IMPORTS). Refusing to silently skip."
+              )
+              sys.exit(1)
           except Exception as err:
               print(f"[ERROR] Failed to import {APP_MODULE}: {err!r}")
               sys.exit(1)
