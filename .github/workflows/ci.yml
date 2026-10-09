@@ -2,12 +2,13 @@
 #
 # Streamlined CI workflow for early-stage development.
 #
-# Install-step design rule used throughout:
-#   NEVER rely on `pip install -e ".[dev]" || pip install <tools>`.
-#   The first command can exit 0 WITHOUT providing the tools you need
-#   (missing/empty [dev] extra only produces a warning). Instead: install the
-#   project if possible, then VERIFY each required tool and install only what
-#   is actually missing.
+# Install-step design rule:
+#   Use `uv sync --frozen` to install exactly what `uv.lock` declares.
+#   `--frozen` makes a stale lockfile fail the job, so mypy/pytest always
+#   run in the same environment that was declared -- not a degraded fallback.
+#   Then run tools via `uv run` so they use the same locked venv.
+#   There is no `pip install ... || echo WARN` fallback: a missing dep is a
+#   real failure that should fail the job, not be silently papered over.
 
 name: CI
 
@@ -45,7 +46,7 @@ defaults:
 
 env:
   PYTHON_VERSION: '3.14'
-  PIP_DISABLE_PIP_VERSION_CHECK: '1'
+  UV_VERSION: 'latest'
   PYTHONDONTWRITEBYTECODE: '1'
   PYTHONUNBUFFERED: '1'
 
@@ -61,24 +62,33 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
-      - name: Set up Python
-        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+      # `setup-uv` installs the requested Python version AND uv in one step,
+      # then manages uv's own cache (replaces the old `actions/setup-python`
+      # + `cache: pip` block).
+      - name: Install uv
+        uses: astral-sh/setup-uv@c18668ad3cf93ea998bef934396af7bb5c839dc7 # v10.2.0
         with:
           python-version: ${{ env.PYTHON_VERSION }}
-          cache: pip
-          cache-dependency-path: |
+          version: ${{ env.UV_VERSION }}
+          enable-cache: true
+          cache-dependency-glob: |
+            uv.lock
             pyproject.toml
-            requirements*.txt
 
-      - name: Run Ruff Lint & Format Check
-        uses: astral-sh/ruff-action@278981a28ce3188b1e39527901f38254bf3aac89 # v4.1.0
-        with:
-          args: check .
+      # Single source of truth for "what is installed".
+      # --frozen       = use uv.lock exactly; fail if pyproject.toml moved
+      # --all-extras   = every [project.optional-dependencies] entry
+      # --all-groups   = every [dependency-groups] entry (incl. dev)
+      # If your project only uses one of those conventions, the other flag
+      # is a harmless no-op. Adjust if you need a slimmer install.
+      - name: Sync dependencies (locked)
+        run: uv sync --frozen --all-extras --all-groups
+
+      - name: Run Ruff Lint
+        run: uv run ruff check .
 
       - name: Verify Ruff Formatting
-        run: |
-          pip install --upgrade pip ruff
-          ruff format --check .
+        run: uv run ruff format --check .
 
       # Skip when the repo has no pre-commit config yet,
       # otherwise pre-commit/action fails outright.
@@ -111,53 +121,28 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
-      - name: Set up Python
-        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+      - name: Install uv
+        uses: astral-sh/setup-uv@c18668ad3cf93ea998bef934396af7bb5c839dc7 # v10.2.0
         with:
           python-version: ${{ env.PYTHON_VERSION }}
-          cache: pip
-          cache-dependency-path: |
+          version: ${{ env.UV_VERSION }}
+          enable-cache: true
+          cache-dependency-glob: |
+            uv.lock
             pyproject.toml
-            requirements*.txt
 
-      - name: Install Dependencies
-        run: |
-          python -m pip install --upgrade pip
-
-          # Preferred: the project's own dependency declaration.
-          if [ -f pyproject.toml ]; then
-            pip install -e ".[dev]" \
-              || echo "[WARN] 'pip install -e .[dev]' failed -- falling back to a standalone mypy install."
-          elif [ -f requirements-dev.txt ]; then
-            pip install -r requirements-dev.txt \
-              || echo "[WARN] requirements-dev.txt install failed -- falling back."
-          elif [ -f requirements.txt ]; then
-            pip install -r requirements.txt \
-              || echo "[WARN] requirements.txt install failed -- falling back."
-          fi
-
-          # Safety net: 'pip install -e .[dev]' can exit 0 WITHOUT providing
-          # mypy (missing or incomplete [dev] extra). '||' never fires in that
-          # case, so verify explicitly and install only what is missing.
-          if ! command -v mypy >/dev/null 2>&1; then
-            echo "[INFO] mypy not provided by the project -- installing it directly."
-            pip install mypy types-requests types-PyYAML
-          fi
+      - name: Sync dependencies (locked)
+        run: uv sync --frozen --all-extras --all-groups
 
       - name: Run Mypy
         run: |
-          if ! command -v mypy >/dev/null 2>&1; then
-            echo "::error::mypy is not available even after the fallback installation."
-            exit 1
-          fi
-
           # Nothing to type-check yet? Skip instead of erroring.
           PY_COUNT=$(find . -type f -name '*.py' \
             -not -path './.git/*' \
-            -not -path './.venv/*' -not -path './venv/*' \
+            -not -path './.venv/*' -not -path './venv/*' -not -path './.uv/*' \
             -not -path './node_modules/*' \
             -not -path './build/*' -not -path './dist/*' \
-            -not -path './.mypy_cache/*' \
+            -not -path './.mypy_cache/*' -not -path './.ruff_cache/*' \
             | wc -l)
           if [ "${PY_COUNT}" -eq 0 ]; then
             echo "[INFO] No Python source files found -- skipping mypy."
@@ -167,10 +152,10 @@ jobs:
           # Phase 1: install missing third-party stubs.
           # NOTE: 'mypy --install-types' exits right after installing -- it does
           # NOT type-check -- so it must be a separate invocation.
-          mypy --install-types --non-interactive . || true
+          uv run mypy --install-types --non-interactive . || true
 
           # Phase 2: the actual type check.
-          mypy .
+          uv run mypy .
 
   # =========================================================================
   # 3. Unit Tests & OpenAPI Schema Contract Validation (Conditional)
@@ -183,54 +168,22 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
-      - name: Set up Python
-        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+      - name: Install uv
+        uses: astral-sh/setup-uv@c18668ad3cf93ea998bef934396af7bb5c839dc7 # v10.2.0
         with:
           python-version: ${{ env.PYTHON_VERSION }}
-          cache: pip
-          cache-dependency-path: |
+          version: ${{ env.UV_VERSION }}
+          enable-cache: true
+          cache-dependency-glob: |
+            uv.lock
             pyproject.toml
-            requirements*.txt
 
-      - name: Install Dependencies
-        run: |
-          python -m pip install --upgrade pip
-
-          if [ -f pyproject.toml ]; then
-            pip install -e ".[dev]" \
-              || echo "[WARN] 'pip install -e .[dev]' failed -- falling back to a standalone tool set."
-          elif [ -f requirements-dev.txt ]; then
-            pip install -r requirements-dev.txt \
-              || echo "[WARN] requirements-dev.txt install failed -- falling back."
-          elif [ -f requirements.txt ]; then
-            pip install -r requirements.txt \
-              || echo "[WARN] requirements.txt install failed -- falling back."
-          fi
-
-          # Verify-and-install: only fires for tools the project did NOT provide.
-          ensure() {
-            local import_name="$1" pip_name="${2:-$1}"
-            if ! python -c "import ${import_name}" >/dev/null 2>&1; then
-              echo "[INFO] '${pip_name}' not provided by the project -- installing it directly."
-              pip install "${pip_name}"
-            fi
-          }
-
-          ensure pytest
-          ensure pytest_cov pytest-cov
-          ensure pytest_asyncio pytest-asyncio
-
-          # Web stack: only when the codebase actually references it, so the
-          # OpenAPI check below can still skip gracefully for non-FastAPI code.
-          if grep -rq --include='*.py' -E '^[[:space:]]*(from|import)[[:space:]]+(fastapi|httpx)\b' \
-               tests open_enterprise_ai src 2>/dev/null; then
-            ensure fastapi
-            ensure httpx
-          fi
+      - name: Sync dependencies (locked)
+        run: uv sync --frozen --all-extras --all-groups
 
       - name: OpenAPI Schema Contract Check (skips if app/FastAPI missing)
         run: |
-          python - <<'PY'
+          uv run python - <<'PY'
           import importlib
           import importlib.util
           import sys
@@ -254,6 +207,8 @@ jobs:
               sys.exit(0)
 
           # BYPASS RULE 2: FastAPI is not yet available for import.
+          # With `uv sync --frozen --all-extras` this check is now meaningful:
+          # if FastAPI really should be installed and isn't, it's a real miss.
           if importlib.util.find_spec("fastapi") is None:
               print("[INFO] FastAPI is not installed -- skipping OpenAPI contract check.")
               sys.exit(0)
@@ -299,14 +254,14 @@ jobs:
             # Only collect coverage for the package when it is importable,
             # otherwise pytest-cov emits noise for a missing module.
             COV_OPTS=()
-            if python -c "import open_enterprise_ai" >/dev/null 2>&1; then
+            if uv run python -c "import open_enterprise_ai" >/dev/null 2>&1; then
               COV_OPTS+=(--cov=open_enterprise_ai)
               COV_OPTS+=(--cov-report=xml:coverage-results/coverage-unit.xml)
               COV_OPTS+=(--cov-report=term-missing)
             else
               echo "[INFO] open_enterprise_ai not importable -- running tests without coverage."
             fi
-            pytest tests/unit \
+            uv run pytest tests/unit \
               --junitxml=test-results/unit-junit.xml \
               "${COV_OPTS[@]}" \
               -v
@@ -337,60 +292,32 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
-      - name: Set up Python
-        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+      - name: Install uv
+        uses: astral-sh/setup-uv@c18668ad3cf93ea998bef934396af7bb5c839dc7 # v10.2.0
         with:
           python-version: ${{ env.PYTHON_VERSION }}
-          cache: pip
-          cache-dependency-path: |
+          version: ${{ env.UV_VERSION }}
+          enable-cache: true
+          cache-dependency-glob: |
+            uv.lock
             pyproject.toml
-            requirements*.txt
 
-      - name: Install Dependencies
-        run: |
-          python -m pip install --upgrade pip
-
-          if [ -f pyproject.toml ]; then
-            pip install -e ".[dev]" \
-              || echo "[WARN] 'pip install -e .[dev]' failed -- falling back to a standalone tool set."
-          elif [ -f requirements-dev.txt ]; then
-            pip install -r requirements-dev.txt \
-              || echo "[WARN] requirements-dev.txt install failed -- falling back."
-          elif [ -f requirements.txt ]; then
-            pip install -r requirements.txt \
-              || echo "[WARN] requirements.txt install failed -- falling back."
-          fi
-
-          ensure() {
-            local import_name="$1" pip_name="${2:-$1}"
-            if ! python -c "import ${import_name}" >/dev/null 2>&1; then
-              echo "[INFO] '${pip_name}' not provided by the project -- installing it directly."
-              pip install "${pip_name}"
-            fi
-          }
-
-          ensure pytest
-          ensure pytest_cov pytest-cov
-          ensure pytest_asyncio pytest-asyncio
-          if grep -rq --include='*.py' -E '^[[:space:]]*(from|import)[[:space:]]+(fastapi|httpx)\b' \
-               tests open_enterprise_ai src 2>/dev/null; then
-            ensure fastapi
-            ensure httpx
-          fi
+      - name: Sync dependencies (locked)
+        run: uv sync --frozen --all-extras --all-groups
 
       - name: Run Integration Tests (if they exist)
         run: |
           mkdir -p test-results coverage-results
           if [ -d "tests/integration" ] && [ -n "$(find tests/integration -name '*.py' -not -name '__init__.py' -not -name 'conftest.py' -print -quit)" ]; then
             COV_OPTS=()
-            if python -c "import open_enterprise_ai" >/dev/null 2>&1; then
+            if uv run python -c "import open_enterprise_ai" >/dev/null 2>&1; then
               COV_OPTS+=(--cov=open_enterprise_ai)
               COV_OPTS+=(--cov-report=xml:coverage-results/coverage-int.xml)
               COV_OPTS+=(--cov-report=term-missing)
             else
               echo "[INFO] open_enterprise_ai not importable -- running tests without coverage."
             fi
-            pytest tests/integration \
+            uv run pytest tests/integration \
               --junitxml=test-results/integration-junit.xml \
               "${COV_OPTS[@]}" \
               -v

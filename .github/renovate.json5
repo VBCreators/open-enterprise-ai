@@ -25,21 +25,11 @@
       groupName: "all non-major dependencies",
     },
     {
-      // CI changes get their own reviewable PRs (overrides the catch-all group)
-      matchManagers: ["github-actions"],
-      groupName: "github-actions",
-    },
-    {
-      // pin base image digests for supply-chain hygiene
-      matchManagers: ["dockerfile", "docker-compose"],
-      pinDigests: true,
-    },
-    {
       matchPackageNames: [
       "langchain", "langchain-*", "langgraph", "langgraph-*",
       "langsmith", "langfuse", "deepagents",
     ],
-    groupName: "langchain ecosystem",
+      groupName: "langchain ecosystem",
     },
   ],
 }
