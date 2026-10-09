@@ -128,6 +128,28 @@ jobs:
             echo "push_enabled=false" >> "$GITHUB_OUTPUT"
           fi
 
+      # ---------------------------------------------------------------------
+      # Configure tags for BOTH registries.
+      #
+      # Original bug: the `images:` list only contained
+      #   `ghcr.io/<owner>/<repo>`
+      # so docker/metadata-action only generated GHCR tags. The Docker Hub
+      # login step ran, but docker/build-push-action received no Docker Hub
+      # tags to push — so the image never actually reached Docker Hub.
+      #
+      # Fix: conditionally append a second `images:` line for Docker Hub,
+      # keyed on `vars.PUSH_TO_DOCKERHUB == 'true'` AND the presence of the
+      # `DOCKERHUB_USERNAME` secret. When the variable is false or the
+      # secret is missing, the line collapses to an empty string, which
+      # docker/metadata-action treats as "no extra image" — preserving the
+      # GHCR-only behavior for everyone else.
+      #
+      # GHCR is intentionally listed FIRST so the `image_ref` step
+      # (head -n1) keeps resolving to the GHCR image. All downstream
+      # scanners (Trivy, Grype, Dockle, SBOM) and the Cosign signature
+      # therefore continue to target GHCR — no collateral changes there.
+      # Docker Hub just gets a parallel push as a side effect of the build.
+      # ---------------------------------------------------------------------
       - name: Configure Docker Metadata & Tags
         id: meta
         if: steps.dockerfile_check.outputs.is_buildable == 'true'
@@ -135,6 +157,7 @@ jobs:
         with:
           images: |
             ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
+            ${{ vars.PUSH_TO_DOCKERHUB == 'true' && secrets.DOCKERHUB_USERNAME && format('docker.io/{0}/{1}', secrets.DOCKERHUB_USERNAME, github.event.repository.name) || '' }}
           tags: |
             type=sha,prefix=sha-,format=short
             type=raw,value=latest,enable=${{ github.ref == 'refs/heads/main' }}
@@ -181,6 +204,10 @@ jobs:
       # into the local Docker daemon.
       #
       # Fix: only enable provenance/sbom when we're actually pushing (--push).
+      #
+      # Note: docker/build-push-action pushes to EVERY tag in `tags:`. So
+      # when the metadata step emits both GHCR and Docker Hub tags, this
+      # one step publishes to both registries — no extra build needed.
       # ---------------------------------------------------------------------
       - name: Build Application Container
         id: build_step
