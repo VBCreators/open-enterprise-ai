@@ -357,7 +357,7 @@ jobs:
       - name: Generate Software Bill of Materials (SBOM via Syft)
         if: steps.dockerfile_check.outputs.is_buildable == 'true'
         continue-on-error: true
-        uses: anchore/sbom-action@f6c3d0fe42c3cf876e3462574e4c9416b5e0f07a # v0.9.0
+        uses: anchore/sbom-action@66cbf4bc1f1c0d2edc94016e65bc221b6bb0ad6c # v0.24.3
         with:
           image: ${{ steps.image_ref.outputs.image_ref }}
           format: spdx-json
