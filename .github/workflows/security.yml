@@ -7,7 +7,7 @@
 # - Dockerfile security & best-practices linting (Hadolint)
 # - GitHub Actions workflow security auditing (zizmor)
 # - Filesystem vulnerability & misconfiguration scanning (Trivy FS)
-# - Supply-chain security health assessment (OpenSSF Scorecard)
+# - Supply-chain security health assessment (OpenSSF Scorecard - moved to .github/workflows/scorecard.yml)
 #
 # All `uses:` references are pinned to immutable 40-character commit SHAs
 # with the human-readable version as a trailing comment so Dependabot can
@@ -18,8 +18,7 @@
 # `osv-scanner-action/` subdirectory, and Google officially recommends
 # consuming it as a *reusable workflow*:
 #   uses: google/osv-scanner-action/.github/workflows/osv-scanner-reusable.yml@<ver>
-# That's the form used below (instead of `uses: google/osv-scanner-action@<ver>`,
-# which errors out with "Top level 'runs:' section is required").
+# Reusable workflows must be invoked at the job level (via `jobs.<id>.uses`).
 
 name: Security
 
@@ -88,7 +87,7 @@ jobs:
         uses: trufflesecurity/trufflehog@bcfcf73aaf4759d4dadc2783177c245a02792318 # v3.97.0
         with:
           path: ./
-          base: ${{ github.event.repository.default_branch }}
+          base: ${{ (github.event_name == 'push' && github.event.before != '' && github.event.before != '0000000000000000000000000000000000000000') && github.event.before || github.event.repository.default_branch }}
           head: HEAD
           extra_args: --debug --only-verified
 
@@ -113,22 +112,29 @@ jobs:
           python-version: ${{ env.PYTHON_VERSION }}
           cache: pip
 
+      # Run Bandit AST Security Scan.
+      # If pyproject.toml is present, we enforce its configuration without a fallback,
+      # ensuring configured exclusions and rules are respected and real findings fail cleanly.
       - name: Run Bandit AST Security Scan
         run: |
           pip install --upgrade pip bandit[toml]
           if [ -f pyproject.toml ]; then
-            bandit -r . -c pyproject.toml -x ./.git,./.venv,./venv,./tests -ll || \
-            bandit -r . -x ./.git,./.venv,./venv,./tests -ll
+            bandit -r . -c pyproject.toml -x ./.git,./.venv,./venv,./tests -ll
           else
             bandit -r . -x ./.git,./.venv,./venv,./tests -ll
           fi
 
+      # Run Semgrep SAST.
+      # Uses a pinned, immutable digest for the semgrep container image to
+      # prevent unexpected rule drift and satisfy repository supply-chain requirements.
+      # Mounts the current working directory via "$PWD" instead of interpolating
+      # ${{ github.workspace }} in the shell script.
       - name: Run Semgrep SAST
         run: |
           docker run --rm \
-            -v "${{ github.workspace }}:/src" \
+            -v "$PWD:/src" \
             -w /src \
-            semgrep/semgrep:latest \
+            semgrep/semgrep@sha256:85782eaf09692e6dfb684cd3bad87ef315775814b01f76b4d15582e4ca7c1c89 \
             semgrep scan \
               --config=p/security-audit \
               --config=p/secrets \
@@ -137,53 +143,73 @@ jobs:
               --error
 
   # =========================================================================
-  # 3. Dependency Vulnerability Audits (OSV-Scanner + pip-audit)
+  # 3. Google OSV-Scanner Reusable Workflow Call
   #
-  # OSV-Scanner is now invoked as a *reusable workflow*. The reusable workflow
-  # declares the permissions it needs (actions: read, contents: read,
-  # security-events: write), so we pre-declare them on the calling job to
-  # satisfy GITHUB_TOKEN scoping. Inputs (scan-args, fail-on-vuln, etc.) are
-  # passed via the `with:` block of the `uses:` step.
+  # Google OSV-Scanner is officially consumed as a reusable workflow:
+  #   google/osv-scanner-action/.github/workflows/osv-scanner-reusable.yml
+  # Reusable workflows in GitHub Actions must be invoked at the *job level*
+  # (via `jobs.<id>.uses`), not as a step under `steps:`.
   #
-  # fail-on-vuln: TRUE so the job actually gates the PR — a SARIF upload
-  # alone only produces a report, it does not block merging.
+  # Gating policy:
+  #   fail-on-vuln: true ensures that identified CVEs break the build,
+  #   enforcing strict gating rather than only uploading SARIF reports.
   # =========================================================================
-  dependency-vulnerability-scan:
-    name: Dependency CVE Scan (OSV-Scanner + pip-audit)
-    runs-on: ubuntu-latest
-    timeout-minutes: 15
+  osv-scanner:
+    name: Dependency CVE Scan (Google OSV-Scanner)
+    uses: google/osv-scanner-action/.github/workflows/osv-scanner-reusable.yml@6e4298ebc4db23e847df9b2e2de2939d6f066c67 # v2.5.1
     permissions:
       contents: read
       security-events: write
       actions: read
+    with:
+      scan-args: |-
+        --skip-git
+        ./
+      fail-on-vuln: true
+      upload-sarif: true
+
+  # =========================================================================
+  # 4. Dependency Vulnerability Audit (pip-audit)
+  #
+  # Complements OSV-Scanner by querying PyPI Advisories directly for Python
+  # packages, scanning requirements.txt or pyproject.toml.
+  # =========================================================================
+  pip-audit:
+    name: Dependency CVE Scan (pip-audit)
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: read
     steps:
       - name: Checkout repository
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
 
-      - name: Run Google OSV-Scanner (reusable workflow)
-        uses: google/osv-scanner-action/.github/workflows/osv-scanner-reusable.yml@6e4298ebc4db23e847df9b2e2de2939d6f066c67 # v2.5.1
+      - name: Set up Python
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
         with:
-          scan-args: |-
-            --skip-git
-            ./
-          fail-on-vuln: true
-          upload-sarif: true
+          python-version: ${{ env.PYTHON_VERSION }}
+          cache: pip
 
       - name: Run pip-audit
         run: |
-          pip install --upgrade pip pip-audit
+          pip install --upgrade pip pip-audit uv
           if [ -f requirements.txt ]; then
             pip-audit -r requirements.txt
+          elif [ -f uv.lock ]; then
+            # Export exact locked dependencies from uv.lock to audit the pinned environment
+            uv export --frozen --all-groups --no-hashes --no-emit-project -o /tmp/requirements.txt
+            pip-audit -r /tmp/requirements.txt
           elif [ -f pyproject.toml ]; then
-            pip-audit
+            # Audit the project directory so dependencies declared in pyproject.toml are inspected
+            pip-audit .
           else
-            echo "No requirements file or pyproject.toml found for pip-audit."
+            echo "No requirements file, uv.lock, or pyproject.toml found for pip-audit."
           fi
 
   # =========================================================================
-  # 4. Dockerfile & Workflow Security (Hadolint + zizmor)
+  # 5. Dockerfile & Workflow Security (Hadolint + zizmor)
   #
   # The Hadolint `if` and `dockerfile` input are kept in sync: the step only
   # runs when a root `Dockerfile` exists, and the input names that exact file.
@@ -222,7 +248,7 @@ jobs:
           zizmor .
 
   # =========================================================================
-  # 5. Filesystem & Misconfiguration Scan (Trivy FS)
+  # 6. Filesystem & Misconfiguration Scan (Trivy FS)
   # =========================================================================
   filesystem-misconfig-scan:
     name: Filesystem & Misconfiguration Scan (Trivy)
@@ -253,34 +279,3 @@ jobs:
         with:
           sarif_file: trivy-fs-results.sarif
           category: trivy-filesystem
-
-  # =========================================================================
-  # 6. Supply Chain Security Health Assessment (OpenSSF Scorecard)
-  # =========================================================================
-  scorecard-analysis:
-    name: Supply Chain Scorecard (OpenSSF)
-    runs-on: ubuntu-latest
-    timeout-minutes: 15
-    permissions:
-      contents: read
-      security-events: write
-      id-token: write
-    steps:
-      - name: Checkout repository
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          persist-credentials: false
-
-      - name: Run OpenSSF Scorecard Analysis
-        uses: ossf/scorecard-action@4eaacf0543bb3f2c246792bd56e8cdeffafb205a # v2.4.3
-        with:
-          results_file: scorecard-results.sarif
-          results_format: sarif
-          publish_results: true
-
-      - name: Upload Scorecard SARIF Report
-        if: always()
-        uses: github/codeql-action/upload-sarif@db488ddef3bf6cb639b32c2e9a7c0a7ea8271d28 # v4.37.8
-        with:
-          sarif_file: scorecard-results.sarif
-          category: openssf-scorecard

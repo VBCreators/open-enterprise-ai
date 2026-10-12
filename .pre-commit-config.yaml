@@ -92,7 +92,7 @@ repos:
       # Enforces branch-and-pull-request workflows.
       - id: no-commit-to-branch
         name: Block Direct Commits to Protected Branches
-        args: ['--branch', 'main', '--branch', 'master', '--branch', 'develop']
+        args: ['--branch', 'main', '--branch', 'master', '--branch', 'dev']
 
       # Checks Python code for left-behind interactive debugging breakpoints (pdb, breakpoint(), ipdb).
       - id: debug-statements
@@ -172,15 +172,8 @@ repos:
   # 6. POST-CHECKOUT HOOKS
   # Executes immediately following `git checkout` or `git switch` to alert developers
   # about workspace or environment drift.
+  # (Note: Executable shebang validation runs on every commit via the pre-commit stage)
   # ===========================================================================
-  - repo: https://github.com/pre-commit/pre-commit-hooks
-    rev: v6.0.0
-    hooks:
-      # Confirms that files checked out with executable bits retained valid shebangs.
-      - id: check-executables-have-shebangs
-        stages: [post-checkout]
-        always_run: false
-
   - repo: local
     hooks:
       # Inspects the git commit diff between the previous ref (HEAD@{1}) and the new ref (HEAD).
@@ -188,7 +181,7 @@ repos:
       - id: check-dependency-sync
         name: Check Python Dependency Drift (Post-Checkout)
         entry: >-
-          bash -c 'if git diff --name-only HEAD@{1} HEAD | grep -E "pyproject.toml|poetry.lock|requirements.txt" > /dev/null; then echo "[POST-CHECKOUT WARNING] Dependencies changed! Run pip install -r requirements.txt or poetry install."; fi'
+          bash -c 'if git diff --name-only HEAD@{1} HEAD | grep -E "pyproject.toml|uv.lock|requirements.txt" > /dev/null; then echo "[POST-CHECKOUT WARNING] Dependencies changed! Run uv sync."; fi'
         language: system
         stages: [post-checkout]
         always_run: true
@@ -217,6 +210,8 @@ repos:
       # Ensures .venv is prioritized on PATH.
       # Skips cleanly if mypy is not installed, no source code directory exists (src/ or app/),
       # or no python files are found. Passes pyproject.toml configuration if present.
+      # always_run: true guarantees the hook runs even on configuration-only pushes
+      # (e.g., pyproject.toml, Dockerfile) so the safety net is never silently bypassed.
       - id: mypy
         name: mypy (static type checking)
         entry: |
@@ -238,13 +233,15 @@ repos:
             exit 0
           fi
           CONFIG_ARGS=()
-          if [ -f pyproject.toml ] && grep -q "[tool.mypy]" pyproject.toml; then
+          # Use fixed-string matching (-F) to check for literal [tool.mypy] section rather than character class
+          if [ -f pyproject.toml ] && grep -qF "[tool.mypy]" pyproject.toml; then
             CONFIG_ARGS=(--config-file=pyproject.toml)
           fi
           mypy "${CONFIG_ARGS[@]}" "$TARGET"
           '
         language: system
         types: [python]
+        always_run: true
         stages: [pre-push]
         pass_filenames: false
         verbose: true
@@ -252,6 +249,8 @@ repos:
       # Runs the test suite via pytest prior to pushing.
       # Sets PYTHONPATH=src to ensure modules resolve correctly without prior installation.
       # Skips cleanly if pytest is not installed or the `tests/` directory does not exist.
+      # always_run: true guarantees the hook runs even on configuration-only pushes
+      # so tests are never silently skipped because no .py files were touched.
       - id: pytest
         name: pytest (unit + integration)
         entry: |
@@ -271,12 +270,15 @@ repos:
           '
         language: system
         types: [python]
+        always_run: true
         stages: [pre-push]
         pass_filenames: false
         verbose: true
 
       # Comprehensive security scan using Bandit across the target source directory.
       # Runs with `-ll` flag to report only Medium and High severity security issues.
+      # always_run: true guarantees the hook runs even on configuration-only pushes
+      # so the full SAST scan is never silently bypassed.
       - id: bandit-full
         name: Bandit (full security scan)
         entry: |
@@ -298,24 +300,40 @@ repos:
             exit 0
           fi
           CONFIG_ARGS=()
-          if [ -f pyproject.toml ] && grep -q "[tool.bandit]" pyproject.toml; then
+          # Use fixed-string matching (-F) to check for literal [tool.bandit] section rather than character class
+          if [ -f pyproject.toml ] && grep -qF "[tool.bandit]" pyproject.toml; then
             CONFIG_ARGS=(-c pyproject.toml)
           fi
           bandit -r "$TARGET" "${CONFIG_ARGS[@]}" -ll
           '
         language: system
         types: [python]
+        always_run: true
         stages: [pre-push]
         pass_filenames: false
         verbose: true
 
       # Runs Semgrep using automatic community rule selection (--config=auto).
-      # Fails (--error) if known security patterns or bugs are matched in src/.
-      # Skips if Semgrep is not installed or neither src/ nor app/ directory exists.
+      # Selects src/ if present, otherwise app/, and passes that exact directory
+      # to Semgrep. Fails (--error) if known security patterns or bugs are matched.
+      # Skips if Semgrep is not installed or neither src/ nor app/ exists.
       - id: semgrep
         name: Semgrep security rules
-        entry: >-
-          bash -c 'export PATH=".venv/bin:$PATH"; if command -v semgrep >/dev/null 2>&1 && ([ -d src ] || [ -d app ]); then semgrep --config=auto --error src; else echo "[SKIP] semgrep - semgrep not found or no src/ directory"; fi'
+        entry: |
+          bash -c '
+          DIR=""
+          if [ -d src ]; then DIR=src
+          elif [ -d app ]; then DIR=app
+          else
+            echo "[SKIP] semgrep - no src/ or app/ directory found"
+            exit 0
+          fi
+          if ! command -v semgrep >/dev/null 2>&1; then
+            echo "[SKIP] semgrep - semgrep is not installed"
+            exit 0
+          fi
+          semgrep --config=auto --error "$DIR"
+          '
         language: system
         stages: [pre-push]
         pass_filenames: false
@@ -343,7 +361,9 @@ repos:
           ' _hadolint
         language: system
         stages: [pre-push]
-        files: Dockerfile.*
+        # Matches Dockerfile or Dockerfile.<extension> (e.g., Dockerfile.dev) across paths,
+        # while excluding non-Dockerfile files like Dockerfile.md or documentation notes.
+        files: '(^|/)Dockerfile(\.[^/]+)?$'
         pass_filenames: true
 
       # Validates that the primary Docker image can successfully build before pushing.
@@ -410,6 +430,7 @@ repos:
 
 
 
+
       # Validates FastAPI OpenAPI JSON schema generation.
       # Executes an inline Python snippet to dynamically import the FastAPI app and evaluate `app.openapi()`.
       # Safe-fail chain logic:
@@ -433,7 +454,9 @@ repos:
           bash -c '
           export PATH=".venv/bin:$PATH"
           export PYTHONPATH=src
-          python - <<PY
+          # Use quoted heredoc delimiter <<"PY" to prevent bash from expanding
+          # parameter variables ($) or backticks inside the inline Python script.
+          python - <<"PY"
           import importlib
           import importlib.util
           import sys

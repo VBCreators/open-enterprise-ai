@@ -9,6 +9,12 @@
 #   Then run tools via `uv run` so they use the same locked venv.
 #   There is no `pip install ... || echo WARN` fallback: a missing dep is a
 #   real failure that should fail the job, not be silently papered over.
+#
+# Stub packages (mypy types-*) MUST be declared in the dev dependency group
+# of pyproject.toml and locked via `uv lock`. We never run `mypy --install-types`
+# at runtime, because that would either silently fail (with `|| true`) or
+# shadow the real error during the type check. The venv from `uv sync` is
+# the single source of truth.
 
 name: CI
 
@@ -46,7 +52,12 @@ defaults:
 
 env:
   PYTHON_VERSION: '3.14'
-  UV_VERSION: 'latest'
+  # Pin uv to a specific major.minor line. Patches flow in automatically;
+  # major/minor bumps arrive via a Renovate/Dependabot PR for review.
+  # Using 'latest' would let every CI run download a different uv release
+  # and silently change resolver/lockfile behavior -- it would also defeat
+  # the point of SHA-pinning actions.
+  UV_VERSION: '0.12.x'
   PYTHONDONTWRITEBYTECODE: '1'
   PYTHONUNBUFFERED: '1'
 
@@ -92,9 +103,14 @@ jobs:
 
       # Skip when the repo has no pre-commit config yet,
       # otherwise pre-commit/action fails outright.
+      # Skip `no-commit-to-branch` in CI: that hook prevents local developer commits directly
+      # to main/dev on local workstations, but CI push workflows intentionally check out
+      # main and dev directly to run tests and validate commits.
       - name: Run Pre-Commit Hooks
         if: hashFiles('.pre-commit-config.yaml', '.pre-commit-config.yml') != ''
         uses: pre-commit/action@2c7b3805fd2a0fd8c1884dcaebf91fc102a13ecd # v3.0.1
+        env:
+          SKIP: no-commit-to-branch
         with:
           extra_args: --all-files --show-diff-on-failure
 
@@ -149,12 +165,13 @@ jobs:
             exit 0
           fi
 
-          # Phase 1: install missing third-party stubs.
-          # NOTE: 'mypy --install-types' exits right after installing -- it does
-          # NOT type-check -- so it must be a separate invocation.
-          uv run mypy --install-types --non-interactive . || true
-
-          # Phase 2: the actual type check.
+          # Stub packages (types-*) are declared in the dev dependency group
+          # of pyproject.toml, so `uv sync` already provides a complete
+          # environment. There is no runtime `mypy --install-types` step --
+          # if a stub is missing, we want the failure to surface here with
+          # the real error message, not be hidden behind `|| true` and
+          # surfaced later as a misleading "Library stubs not installed"
+          # error during the actual type check.
           uv run mypy .
 
   # =========================================================================

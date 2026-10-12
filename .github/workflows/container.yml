@@ -9,7 +9,8 @@
 # - Dockle CIS Docker Benchmark compliance check
 # - SPDX Software Bill of Materials (SBOM) generation (Syft)
 # - SLSA Build Provenance attestation (actions/attest-build-provenance)
-# - Keyless cryptographic container signing (Sigstore Cosign via OIDC on main)
+# - Keyless cryptographic container signing (Sigstore Cosign via OIDC on
+#   main branch AND release-tag pushes refs/tags/v*)
 # - Safe delivery to GitHub Container Registry (GHCR) / Docker Hub
 #
 # All `uses:` references are pinned to immutable 40-character commit SHAs
@@ -87,6 +88,25 @@ jobs:
           persist-credentials: false
 
       # ---------------------------------------------------------------------
+      # Normalize repository image name to lowercase.
+      #
+      # GitHub repository paths can contain uppercase letters (e.g., 'VBCreators/repo').
+      # Container registries (GHCR, Docker Hub) strictly require lowercase image names.
+      # Normalizing IMAGE_NAME to lowercase in GITHUB_ENV guarantees that all
+      # subsequent steps (metadata tags, image references, attestations, and Cosign)
+      # reference the valid lowercase image name.
+      # ---------------------------------------------------------------------
+      - name: Normalize Image Name to Lowercase
+        id: normalize_image
+        env:
+          REPO_RAW: ${{ github.repository }}
+        run: |
+          image_lower="$(echo "${REPO_RAW}" | tr '[:upper:]' '[:lower:]')"
+          echo "IMAGE_NAME=${image_lower}" >> "$GITHUB_ENV"
+          echo "image_name=${image_lower}" >> "$GITHUB_OUTPUT"
+          echo "Normalized image name: ${image_lower}"
+
+      # ---------------------------------------------------------------------
       # Pre-flight: Detect whether the Dockerfile is actually buildable.
       # Empty file, missing file, or comment/whitespace-only file -> skip.
       #
@@ -128,9 +148,18 @@ jobs:
       # (semgrep `run-shell-injection`) — GitHub sets these env vars via
       # a safe API instead of pasting them raw into the script.
       #
+      # Two distinct outputs:
+      #   push_enabled  -> true for main / dev / refs/tags/v*
+      #                    (drives "should we push to GHCR/Docker Hub?")
+      #   sign_enabled  -> true for main / refs/tags/v*  (NOT dev)
+      #                    (drives "should we Cosign-sign the image?")
       #
-      #   Release pushes (refs/tags/vX.Y.Z) must also be authorized, otherwise the
-      #   configured semver tag is never published.
+      # Why dev is published but NOT signed: dev is an integration
+      # branch, its images are mutable and not consumed by downstream
+      # verifiers. Pushing them to the Sigstore transparency log would
+      # just create noise. Release tags (v*) and main, however, are the
+      # artifacts consumers verify with `cosign verify`, so they MUST
+      # be signed — otherwise versioned images have no integrity proof.
       # ---------------------------------------------------------------------
       - name: Determine if Push is Authorized
         id: auth_check
@@ -140,6 +169,7 @@ jobs:
           GITHUB_REF: ${{ github.ref }}
         run: |
           push_enabled="false"
+          sign_enabled="false"
 
           if [ "${EVENT_NAME}" = "push" ]; then
             case "${GITHUB_REF}" in
@@ -147,10 +177,17 @@ jobs:
                 push_enabled="true"
                 ;;
             esac
+
+            case "${GITHUB_REF}" in
+              refs/heads/main|refs/tags/v*)
+                sign_enabled="true"
+                ;;
+            esac
           fi
 
           echo "push_enabled=${push_enabled}" >> "$GITHUB_OUTPUT"
-          echo "auth_check: EVENT_NAME=${EVENT_NAME} REF=${GITHUB_REF} push_enabled=${push_enabled}"
+          echo "sign_enabled=${sign_enabled}" >> "$GITHUB_OUTPUT"
+          echo "auth_check: EVENT_NAME=${EVENT_NAME} REF=${GITHUB_REF} push_enabled=${push_enabled} sign_enabled=${sign_enabled}"
 
       # ---------------------------------------------------------------------
       # Configure tags for BOTH registries.
@@ -193,6 +230,15 @@ jobs:
             type=raw,value=dev,enable=${{ github.ref == 'refs/heads/dev' }}
             type=semver,pattern={{version}}
 
+      # ---------------------------------------------------------------------
+      # Resolve primary image reference for scanning and attestation.
+      #
+      # docker/metadata-action produces multiple tags. When multiple registries
+      # or extra tags (e.g. latest, semver) are configured, `head -n1` could
+      # select a Docker Hub or variable tag. We explicitly filter for the
+      # immutable GHCR sha- tag so scanners, attestations, and Cosign target
+      # the exact same artifact.
+      # ---------------------------------------------------------------------
       - name: Resolve primary image reference
         id: image_ref
         if: steps.dockerfile_check.outputs.is_buildable == 'true'
@@ -200,8 +246,12 @@ jobs:
           META_TAGS: ${{ steps.meta.outputs.tags }}
         shell: bash
         run: |
-          # Take the first tag produced by docker/metadata-action.
-          primary="$(echo "${META_TAGS}" | head -n1 | tr -d '[:space:]')"
+          # Explicitly match the GHCR sha tag generated by metadata-action.
+          primary="$(printf '%s\n' "${META_TAGS}" | grep -m1 "^${REGISTRY}/${IMAGE_NAME}:sha-" | tr -d '[:space:]')"
+          if [ -z "${primary}" ]; then
+            # Fallback to the first non-empty tag if the sha pattern did not match.
+            primary="$(printf '%s\n' "${META_TAGS}" | head -n1 | tr -d '[:space:]')"
+          fi
           echo "image_ref=${primary}" >> "$GITHUB_OUTPUT"
           echo "Using image reference: ${primary}"
 
@@ -329,12 +379,24 @@ jobs:
           subject-digest: ${{ steps.build_step.outputs.digest }}
           push-to-registry: true
 
+      # ---------------------------------------------------------------------
+      # Cosign keyless signing.
+      #
+      # Gated on `sign_enabled` (not `push_enabled`) because dev-branch
+      # pushes publish images but intentionally leave them unsigned —
+      # see auth_check step for the full policy.
+      #
+      # Without this gate, refs/tags/v* pushes (e.g. v1.2.3) would push
+      # and attest the artifact but never sign it, breaking
+      # `cosign verify ghcr.io/<owner>/<repo>:1.2.3` for every
+      # downstream consumer that hard-fails on unsigned releases.
+      # ---------------------------------------------------------------------
       - name: Install Cosign
-        if: steps.dockerfile_check.outputs.is_buildable == 'true' && github.event_name == 'push' && github.ref == 'refs/heads/main'
+        if: steps.dockerfile_check.outputs.is_buildable == 'true' && steps.auth_check.outputs.sign_enabled == 'true'
         uses: sigstore/cosign-installer@6f9f17788090df1f26f669e9d70d6ae9567deba6 # v4.1.2
 
       - name: Sign Container Image (Keyless OIDC)
-        if: steps.dockerfile_check.outputs.is_buildable == 'true' && github.event_name == 'push' && github.ref == 'refs/heads/main'
+        if: steps.dockerfile_check.outputs.is_buildable == 'true' && steps.auth_check.outputs.sign_enabled == 'true'
         env:
           REGISTRY: ${{ env.REGISTRY }}
           IMAGE_NAME: ${{ env.IMAGE_NAME }}
