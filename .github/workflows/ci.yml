@@ -1,0 +1,433 @@
+# .github/workflows/ci.yml
+#
+# Streamlined CI workflow for early-stage development.
+#
+# Install-step design rule:
+#   Use `uv sync --frozen` to install exactly what `uv.lock` declares.
+#   `--frozen` makes a stale lockfile fail the job, so mypy/pytest always
+#   run in the same environment that was declared -- not a degraded fallback.
+#   Then run tools via `uv run` so they use the same locked venv.
+#   There is no `pip install ... || echo WARN` fallback: a missing dep is a
+#   real failure that should fail the job, not be silently papered over.
+#
+# Stub packages (mypy types-*) MUST be declared in the dev dependency group
+# of pyproject.toml and locked via `uv lock`. We never run `mypy --install-types`
+# at runtime, because that would either silently fail (with `|| true`) or
+# shadow the real error during the type check. The venv from `uv sync` is
+# the single source of truth.
+
+name: CI
+
+on:
+  push:
+    branches:
+      - main
+      - dev
+      - 'feature/**'
+      - 'bugfix/**'
+      - 'hotfix/**'
+      - 'refactor/**'
+      - 'chore/**'
+  pull_request:
+    branches:
+      - main
+      - dev
+    types:
+      - opened
+      - synchronize
+      - reopened
+      - ready_for_review
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+defaults:
+  run:
+    shell: bash
+
+env:
+  PYTHON_VERSION: '3.14'
+  # Pin uv to a specific major.minor line. Patches flow in automatically;
+  # major/minor bumps arrive via a Renovate/Dependabot PR for review.
+  # Using 'latest' would let every CI run download a different uv release
+  # and silently change resolver/lockfile behavior -- it would also defeat
+  # the point of SHA-pinning actions.
+  UV_VERSION: '0.12.x'
+  PYTHONDONTWRITEBYTECODE: '1'
+  PYTHONUNBUFFERED: '1'
+
+jobs:
+  # =========================================================================
+  # 1. Code Quality, Formatting, Pre-Commit & Syntax Hygiene
+  # =========================================================================
+  format-and-lint:
+    name: Lint & Code Quality
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      # `setup-uv` installs the requested Python version AND uv in one step,
+      # then manages uv's own cache (replaces the old `actions/setup-python`
+      # + `cache: pip` block).
+      - name: Install uv
+        uses: astral-sh/setup-uv@c18668ad3cf93ea998bef934396af7bb5c839dc7 # v10.2.0
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          version: ${{ env.UV_VERSION }}
+          enable-cache: true
+          cache-dependency-glob: |
+            uv.lock
+            pyproject.toml
+
+      # Single source of truth for "what is installed".
+      # --frozen       = use uv.lock exactly; fail if pyproject.toml moved
+      # --all-extras   = every [project.optional-dependencies] entry
+      # --all-groups   = every [dependency-groups] entry (incl. dev)
+      # If your project only uses one of those conventions, the other flag
+      # is a harmless no-op. Adjust if you need a slimmer install.
+      - name: Sync dependencies (locked)
+        run: uv sync --frozen --all-extras --all-groups
+
+      - name: Run Ruff Lint
+        run: uv run ruff check .
+
+      - name: Verify Ruff Formatting
+        run: uv run ruff format --check .
+
+      # Skip when the repo has no pre-commit config yet,
+      # otherwise pre-commit/action fails outright.
+      # Skip `no-commit-to-branch` in CI: that hook prevents local developer commits directly
+      # to main/dev on local workstations, but CI push workflows intentionally check out
+      # main and dev directly to run tests and validate commits.
+      - name: Run Pre-Commit Hooks
+        if: hashFiles('.pre-commit-config.yaml', '.pre-commit-config.yml') != ''
+        uses: pre-commit/action@2c7b3805fd2a0fd8c1884dcaebf91fc102a13ecd # v3.0.1
+        env:
+          SKIP: no-commit-to-branch
+        with:
+          extra_args: --all-files --show-diff-on-failure
+
+      - name: Validate Workflow YAML Files (actionlint)
+        uses: rhysd/actionlint@914e7df21a07ef503a81201c76d2b11c789d3fca # v1.7.12
+
+      - name: Validate Docker Compose Configurations
+        run: |
+          for f in compose.yaml compose.yml compose.dev.yaml compose.dev.yml docker-compose.yaml docker-compose.yml; do
+            if [ -f "$f" ]; then
+              echo "[INFO] Validating $f"
+              docker compose -f "$f" config --quiet
+            fi
+          done
+
+  # =========================================================================
+  # 2. Static Type Checking
+  # =========================================================================
+  type-check:
+    name: Static Type Check (Mypy)
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@c18668ad3cf93ea998bef934396af7bb5c839dc7 # v10.2.0
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          version: ${{ env.UV_VERSION }}
+          enable-cache: true
+          cache-dependency-glob: |
+            uv.lock
+            pyproject.toml
+
+      - name: Sync dependencies (locked)
+        run: uv sync --frozen --all-extras --all-groups
+
+      - name: Run Mypy
+        run: |
+          # Nothing to type-check yet? Skip instead of erroring.
+          PY_COUNT=$(find . -type f -name '*.py' \
+            -not -path './.git/*' \
+            -not -path './.venv/*' -not -path 'venv/*' -not -path './.uv/*' \
+            -not -path './node_modules/*' \
+            -not -path './build/*' -not -path './dist/*' \
+            -not -path './.mypy_cache/*' -not -path './.ruff_cache/*' \
+            | wc -l)
+          if [ "${PY_COUNT}" -eq 0 ]; then
+            echo "[INFO] No Python source files found -- skipping mypy."
+            exit 0
+          fi
+
+          # Stub packages (types-*) are declared in the dev dependency group
+          # of pyproject.toml, so `uv sync` already provides a complete
+          # environment. There is no runtime `mypy --install-types` step --
+          # if a stub is missing, we want the failure to surface here with
+          # the real error message, not be hidden behind `|| true` and
+          # surfaced later as a misleading "Library stubs not installed"
+          # error during the actual type check.
+          uv run mypy .
+
+  # =========================================================================
+  # 3. Unit Tests & OpenAPI Schema Contract Validation (Conditional)
+  # =========================================================================
+  unit-and-api-tests:
+    name: Unit & API Contract Tests
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@c18668ad3cf93ea998bef934396af7bb5c839dc7 # v10.2.0
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          version: ${{ env.UV_VERSION }}
+          enable-cache: true
+          cache-dependency-glob: |
+            uv.lock
+            pyproject.toml
+
+      - name: Sync dependencies (locked)
+        run: uv sync --frozen --all-extras --all-groups
+
+      - name: OpenAPI Schema Contract Check (skips if app/FastAPI missing)
+        run: |
+          uv run python - <<'PY'
+          import importlib
+          import importlib.util
+          import sys
+          from pathlib import Path
+
+          APP_MODULE = "open_enterprise_ai.main"
+
+          # Support src/ layouts even when the package was not installed.
+          if Path("src").is_dir():
+              sys.path.insert(0, str(Path("src").resolve()))
+
+          # BYPASS RULE 1: the application entrypoint does not exist yet.
+          if not any(
+              p.is_file()
+              for p in (
+                  Path("open_enterprise_ai") / "main.py",
+                  Path("src") / "open_enterprise_ai" / "main.py",
+              )
+          ):
+              print(f"[INFO] {APP_MODULE}.py does not exist yet -- skipping OpenAPI contract check.")
+              sys.exit(0)
+
+          # BYPASS RULE 2: FastAPI is not yet available for import.
+          # With `uv sync --frozen --all-extras` this check is now meaningful:
+          # if FastAPI really should be installed and isn't, it's a real miss.
+          if importlib.util.find_spec("fastapi") is None:
+              print("[INFO] FastAPI is not installed -- skipping OpenAPI contract check.")
+              sys.exit(0)
+
+          # The app exists and FastAPI is available: failures from here are real.
+          #
+          # Known-optional third-party packages. If one of these is missing
+          # from the environment, it's a legitimate "skip" -- the app is
+          # intentionally tolerant of them being absent. Keep this list small,
+          # explicit, and reviewed. NEVER add internal project modules here:
+          # a missing internal module means a broken app and must fail CI.
+          OPTIONAL_IMPORTS = {
+              "openai",
+              "anthropic",
+              "langchain_community",
+              "langchain_openai",
+              "pinecone",
+              "qdrant_client",
+              "weaviate",
+          }
+
+          try:
+              module = importlib.import_module(APP_MODULE)
+          except ModuleNotFoundError as err:
+              missing = err.name or ""
+              # Normalize submodules to their top-level package so the
+              # allow-list stays flat (e.g. "langchain_community.embeddings"
+              # -> "langchain_community").
+              top_level = missing.split(".")[0] if missing else ""
+              if top_level in OPTIONAL_IMPORTS:
+                  print(
+                      f"[WARN] {APP_MODULE} skipped optional dependency: {missing!r} "
+                      f"(in OPTIONAL_IMPORTS allow-list)."
+                  )
+                  sys.exit(0)
+              # Anything else -- internal project modules, declared deps,
+              # typos -- is a REAL failure and must fail the job.
+              print(
+                  f"[ERROR] {APP_MODULE} requires missing module {missing!r} "
+                  f"(not in OPTIONAL_IMPORTS). Refusing to silently skip."
+              )
+              sys.exit(1)
+          except Exception as err:
+              print(f"[ERROR] Failed to import {APP_MODULE}: {err!r}")
+              sys.exit(1)
+
+          app = getattr(module, "app", None)
+          if app is None:
+              print(f"[INFO] {APP_MODULE} exists but does not define 'app' yet -- skipping.")
+              sys.exit(0)
+
+          if not callable(getattr(app, "openapi", None)):
+              print(f"[INFO] {APP_MODULE}.app is not a FastAPI app yet -- skipping.")
+              sys.exit(0)
+
+          try:
+              schema = app.openapi()
+          except Exception as err:
+              print(f"[ERROR] app.openapi() raised: {err!r}")
+              sys.exit(1)
+
+          if not isinstance(schema, dict) or "openapi" not in schema:
+              print("[ERROR] Invalid OpenAPI schema generated.")
+              sys.exit(1)
+
+          print(f"[OK] FastAPI OpenAPI schema validated (OpenAPI {schema.get('openapi')}).")
+          PY
+
+      - name: Run Unit Tests (if they exist)
+        run: |
+          mkdir -p test-results coverage-results
+          if [ -d "tests/unit" ] && [ -n "$(find tests/unit -name '*.py' -not -name '__init__.py' -not -name 'conftest.py' -print -quit)" ]; then
+            # Only collect coverage for the package when it is importable,
+            # otherwise pytest-cov emits noise for a missing module.
+            COV_OPTS=()
+            if uv run python -c "import open_enterprise_ai" >/dev/null 2>&1; then
+              COV_OPTS+=(--cov=open_enterprise_ai)
+              COV_OPTS+=(--cov-report=xml:coverage-results/coverage-unit.xml)
+              COV_OPTS+=(--cov-report=term-missing)
+            else
+              echo "[INFO] open_enterprise_ai not importable -- running tests without coverage."
+            fi
+            uv run pytest tests/unit \
+              --junitxml=test-results/unit-junit.xml \
+              "${COV_OPTS[@]}" \
+              -v
+          else
+            echo "[INFO] No unit tests found in tests/unit. Skipping."
+          fi
+
+      - name: Upload Unit Test Results
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: unit-test-results-${{ github.sha }}
+          path: |
+            test-results/
+            coverage-results/
+          if-no-files-found: ignore
+          retention-days: 7
+
+  # =========================================================================
+  # 4. Integration Tests (Conditional, No DB Containers)
+  # =========================================================================
+  integration-and-db-tests:
+    name: Integration Tests
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    needs: [format-and-lint]
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@c18668ad3cf93ea998bef934396af7bb5c839dc7 # v10.2.0
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          version: ${{ env.UV_VERSION }}
+          enable-cache: true
+          cache-dependency-glob: |
+            uv.lock
+            pyproject.toml
+
+      - name: Sync dependencies (locked)
+        run: uv sync --frozen --all-extras --all-groups
+
+      - name: Run Integration Tests (if they exist)
+        run: |
+          mkdir -p test-results coverage-results
+          if [ -d "tests/integration" ] && [ -n "$(find tests/integration -name '*.py' -not -name '__init__.py' -not -name 'conftest.py' -print -quit)" ]; then
+            COV_OPTS=()
+            if uv run python -c "import open_enterprise_ai" >/dev/null 2>&1; then
+              COV_OPTS+=(--cov=open_enterprise_ai)
+              COV_OPTS+=(--cov-report=xml:coverage-results/coverage-int.xml)
+              COV_OPTS+=(--cov-report=term-missing)
+            else
+              echo "[INFO] open_enterprise_ai not importable -- running tests without coverage."
+            fi
+            uv run pytest tests/integration \
+              --junitxml=test-results/integration-junit.xml \
+              "${COV_OPTS[@]}" \
+              -v
+          else
+            echo "[INFO] No integration tests found in tests/integration. Skipping."
+          fi
+
+      - name: Upload Integration Test Results
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: integration-test-results-${{ github.sha }}
+          path: |
+            test-results/
+            coverage-results/
+          if-no-files-found: ignore
+          retention-days: 7
+
+  # =========================================================================
+  # 5. Final Quality Gate
+  # =========================================================================
+  coverage-gate:
+    name: CI Gate Check
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    if: always()
+    needs:
+      - format-and-lint
+      - type-check
+      - unit-and-api-tests
+      - integration-and-db-tests
+    steps:
+      - name: Verify All Required CI Checks Passed
+        env:
+          FORMAT_AND_LINT: ${{ needs.format-and-lint.result }}
+          TYPE_CHECK: ${{ needs.type-check.result }}
+          UNIT_AND_API: ${{ needs.unit-and-api-tests.result }}
+          INTEGRATION: ${{ needs.integration-and-db-tests.result }}
+        run: |
+          results=(
+            "${FORMAT_AND_LINT}"
+            "${TYPE_CHECK}"
+            "${UNIT_AND_API}"
+            "${INTEGRATION}"
+          )
+
+          for result in "${results[@]}"; do
+            case "$result" in
+              success|skipped)
+                ;;
+              *)
+                echo "::error::A required CI quality or testing check failed: ${result}"
+                exit 1
+                ;;
+            esac
+          done
+
+          echo "All required CI quality, linting, type-checking, and test gates passed."
