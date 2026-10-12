@@ -1,10 +1,249 @@
-# Python-generated files
+# ============================================
+# Python
+# ============================================
 __pycache__/
-*.py[oc]
+*.py[cod]
+*$py.class
+*.so
+.Python
+
+# Packaging
 build/
+develop-eggs/
 dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
 wheels/
-*.egg-info
+share/python-wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+MANIFEST
+*.manifest
+*.spec
 
 # Virtual environments
-.venv
+.venv/
+venv/
+env/
+ENV/
+env.bak/
+venv.bak/
+.pixi/
+__pypackages__/
+
+# Tooling & caches
+.mypy_cache/
+.dmypy.json
+dmypy.json
+.pytest_cache/
+.ruff_cache/
+.tox/
+.nox/
+.coverage
+.coverage.*
+htmlcov/
+.hypothesis/
+.cache/
+.ipynb_checkpoints/
+*.ipynb
+.pdm-python
+.pdm-build/
+.pytype/
+.pyre/
+cython_debug/
+
+# Installer logs
+pip-log.txt
+pip-delete-this-directory.txt
+
+# ============================================
+# Environments & Secrets
+# ============================================
+.env
+.env.*
+!.env.example
+.envrc
+.env.production
+.pypirc
+.streamlit/secrets.toml
+
+# ============================================
+# Node.js / Frontend
+# ============================================
+node_modules/
+.pnpm-store/
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+.next/
+.nuxt/
+out/
+dist/
+build/
+.turbo/
+.vercel/
+*.tsbuildinfo
+.eslintcache
+.stylelintcache
+
+# ============================================
+# AI / ML Specific
+# ============================================
+# Model weights & checkpoints
+*.pt
+*.pth
+*.safetensors
+*.onnx
+*.h5
+*.ckpt
+*.pkl
+models/
+checkpoints/
+weights/
+huggingface/
+
+# Caches
+.cache/
+.transformers_cache/
+.torch/
+wandb/
+mlruns/
+lightning_logs/
+tensorboard/
+runs/
+
+# Local data & vector stores
+data/
+datasets/
+raw_data/
+processed_data/
+chroma/
+faiss/
+pinecone/
+qdrant/
+weaviate/
+*.db
+*.sqlite
+*.sqlite3
+*.rdb
+*.aof
+
+# ============================================
+# Tests & Coverage
+# ============================================
+coverage/
+test-results/
+coverage-results/
+.nyc_output/
+nosetests.xml
+coverage.xml
+*.cover
+*.py.cover
+cover/
+
+# ============================================
+# Framework-specific
+# ============================================
+# Django
+local_settings.py
+db.sqlite3
+db.sqlite3-journal
+
+# Flask
+instance/
+.webassets-cache
+
+# Celery
+celerybeat-schedule
+celerybeat.pid
+
+# Redis / RabbitMQ / ActiveMQ
+*.pid
+mnesia/
+rabbitmq/
+rabbitmq-data/
+activemq-data/
+
+# Jupyter / IPython
+profile_default/
+ipython_config.py
+
+# Marimo
+marimo/_static/
+marimo/_lsp/
+__marimo__/
+
+# ============================================
+# IDE, Editors & Agents
+# ============================================
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+.DS_Store
+Thumbs.db
+tempCodeRunnerFile.py
+
+# AI agent folders
+.codex/
+.cursor/
+.gemini/
+.zed/
+.mcp.json
+opencode.json
+config/mcporter.json
+.swcode/
+.vscode-agent/
+.abstra/
+
+# Agent run history (can be large)
+.runs/
+.agent_runs/
+.cursor_runs/
+.gemini_runs/
+.mcp_runs/
+.opencode_runs/
+.swcode_runs/
+.vscode_agent_runs/
+
+# ============================================
+# Temporary & Logs
+# ============================================
+*.log
+logs/
+tmp/
+temp/
+*.tmp
+*.temp
+
+# ============================================
+# Documentation builds
+# ============================================
+docs/_build/
+/site
+
+# ============================================
+# OS & Misc
+# ============================================
+.DS_Store
+Thumbs.db
+*.sage.py
+.scrapy
+.pybuilder/
+target/
+
+
+# ============================================
+# Sub Agents & Skills
+# ============================================
+.agents/*
+.agents/
