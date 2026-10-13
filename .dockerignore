@@ -1,0 +1,30 @@
+# ============================================
+# Environments & Secrets
+# ============================================
+.env
+.env.*
+!.env.example
+.envrc
+
+# ============================================
+# Git, Tooling & Caches
+# ============================================
+.git/
+.github/
+.venv/
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+.mypy_cache/
+.ruff_cache/
+.pytest_cache/
+test-results/
+coverage-results/
+.coverage
+.coverage.*
+htmlcov/
+*.log
+tmp/
+temp/
