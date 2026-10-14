@@ -124,7 +124,7 @@ repos:
   # High-performance Rust-based linter and formatter (Ruff).
   # ===========================================================================
   - repo: https://github.com/astral-sh/ruff-pre-commit
-    rev: v0.16.10
+    rev: v0.17.0
     hooks:
       # Runs the Ruff linter against modified files. The `--fix` flag automatically
       # remedies auto-fixable lint rule violations.
