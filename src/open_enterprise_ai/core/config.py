@@ -27,6 +27,16 @@ AppEnvType = Literal["local", "development", "test", "staging", "production"]
 LogLevelType = Literal["DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"]
 
 
+INSECURE_DEFAULT_SECRET_KEYS: frozenset[str] = frozenset(
+    {
+        "insecure-dev-secret-change-in-production",
+        "change-this-insecure-dev-secret-to-a-secure-random-value",
+    }
+)
+DEFAULT_CONTAINER_SECRETS_DIR: Path = Path("/run/secrets")
+MIN_PRODUCTION_SECRET_KEY_LENGTH: int = 16
+
+
 def _resolve_env_files(app_env: str) -> tuple[Path, ...]:
     """Return absolute paths for base and environment-specific env files."""
     return (
@@ -48,7 +58,7 @@ class Settings(BaseSettings):
     # Core configuration fields
     APP_ENV: AppEnvType = "local"
     DEBUG: bool = False
-    APP_NAME: str = "app"
+    APP_NAME: str = "open-enterprise-ai"
     APP_HOST: str = "127.0.0.1"
     APP_PORT: int = Field(8000, ge=1, le=65535)
     LOG_LEVEL: LogLevelType = "INFO"
@@ -61,7 +71,7 @@ class Settings(BaseSettings):
         # to determine which .env file to load, and to prevent .env files
         # from overriding APP_ENV.
         if "APP_ENV" not in values:
-            raw_env = os.getenv("APP_ENV", "local").strip().lower()
+            raw_env = (os.getenv("APP_ENV") or "local").strip().lower() or "local"
             values["APP_ENV"] = raw_env
 
         # Build absolute env file paths anchored to project root
@@ -74,16 +84,26 @@ class Settings(BaseSettings):
             secrets_dir = os.getenv("SECRETS_DIR")
             if secrets_dir and Path(secrets_dir).is_dir():
                 values["_secrets_dir"] = secrets_dir
-            elif Path("/run/secrets").is_dir():
-                values["_secrets_dir"] = "/run/secrets"
+            elif DEFAULT_CONTAINER_SECRETS_DIR.is_dir():
+                values["_secrets_dir"] = DEFAULT_CONTAINER_SECRETS_DIR
 
         super().__init__(**values)
 
     @model_validator(mode="after")
     def validate_production_guardrails(self) -> Settings:
-        """Fail fast if DEBUG is enabled in production."""
-        if self.APP_ENV == "production" and self.DEBUG:
-            raise ValueError("DEBUG must not be True in production environment")
+        """Fail fast on insecure configuration in production."""
+        if self.APP_ENV == "production":
+            if self.DEBUG:
+                raise ValueError("DEBUG must not be True in production environment")
+            secret_val = self.SECRET_KEY.get_secret_value()
+            if secret_val in INSECURE_DEFAULT_SECRET_KEYS:
+                raise ValueError(
+                    "SECRET_KEY must be set to a secure, non-default value in production"
+                )
+            if len(secret_val) < MIN_PRODUCTION_SECRET_KEY_LENGTH:
+                raise ValueError(
+                    f"SECRET_KEY must be at least {MIN_PRODUCTION_SECRET_KEY_LENGTH} characters in production"
+                )
         return self
 
 

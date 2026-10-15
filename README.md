@@ -50,13 +50,18 @@ uv run open-enterprise-ai
 
 ### Production Guardrails
 
-In `production` (`APP_ENV=production`), `DEBUG` must be set to `False`. If `DEBUG=True` is detected in a production environment, application startup will fail fast with a validation error.
+In `production` (`APP_ENV=production`):
+- `DEBUG` must be set to `False`. If `DEBUG=True` is detected, application startup fails fast with a validation error.
+- `SECRET_KEY` must be configured to a secure, custom value. Startup fails immediately if `SECRET_KEY` is left as the development default (`insecure-dev-secret-change-in-production`), matches the `.env.example` placeholder (`change-this-insecure-dev-secret-to-a-secure-random-value`), or has fewer than 16 characters.
 
 ### Secrets Handling
 
 Sensitive values (such as `SECRET_KEY`, API keys, or database credentials) use `pydantic.SecretStr`. Their values are automatically masked as `**********` in string representations, tracebacks, and logs. To access the raw secret value in code, use `.get_secret_value()`.
 
-Containerized deployments can mount secrets into `/run/secrets` or specify a directory via `SECRETS_DIR`.
+Containerized deployments can mount secrets into `/run/secrets` or specify a directory via the `SECRETS_DIR` environment variable:
+- If `/run/secrets` exists and is a directory, it is automatically checked as a secret directory when `SECRETS_DIR` is not explicitly set.
+- `SECRETS_DIR` is ignored if the specified path does not exist or is not a directory.
+- Each mounted secret file must have a filename matching the lowercase configuration field name (e.g. `/run/secrets/secret_key`).
 
 ### Adding a New Setting
 
