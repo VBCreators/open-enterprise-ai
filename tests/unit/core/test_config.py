@@ -39,7 +39,7 @@ def test_defaults_load_with_no_env_or_files(
     settings = Settings(_env_file=(non_existent_env, non_existent_env_local))
     assert settings.APP_ENV == "local"
     assert settings.DEBUG is False
-    assert settings.APP_NAME == "app"
+    assert settings.APP_NAME == "open-enterprise-ai"
     assert settings.APP_HOST == "127.0.0.1"
     assert settings.APP_PORT == 8000
     assert settings.LOG_LEVEL == "INFO"
