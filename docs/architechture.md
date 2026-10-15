@@ -30,7 +30,7 @@ built on FastAPI.
   domains (base repository/unit-of-work interfaces, event bus, clock,
   logging context). Nothing here should import from `domains/` or
   `infrastructure/`.
-- **`api/`** at the project root level (`src/ai_rag/api/`) is the app-wide
+- **`api/`** at the project root level (`src/open_enterprise_ai/api/`) is the app-wide
   HTTP wiring: the global router that mounts each domain's router, shared
   FastAPI dependencies, and middleware. It does not contain business logic.
 
@@ -102,7 +102,7 @@ must not be imported from outside it.
 
 ## 5. Tests mirror `src/`
 
-`tests/` structure follows `src/ai_rag/` 1:1:
+`tests/` structure follows `src/open_enterprise_ai/` 1:1:
 
 - `tests/unit/domains/<domain>/` — unit tests for services/ports, mocked
   dependencies, no I/O.
