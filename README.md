@@ -59,9 +59,10 @@ In `production` (`APP_ENV=production`):
 Sensitive values (such as `SECRET_KEY`, API keys, or database credentials) use `pydantic.SecretStr`. Their values are automatically masked as `**********` in string representations, tracebacks, and logs. To access the raw secret value in code, use `.get_secret_value()`.
 
 Containerized deployments can mount secrets into `/run/secrets` or specify a directory via the `SECRETS_DIR` environment variable:
-- If `/run/secrets` exists and is a directory, it is automatically checked as a secret directory when `SECRETS_DIR` is not explicitly set.
-- `SECRETS_DIR` is ignored if the specified path does not exist or is not a directory.
+- If `/run/secrets` exists and is a directory, it is automatically checked as the fallback secrets directory when `SECRETS_DIR` is unset, missing, or not a directory.
+- `SECRETS_DIR` is ignored if the specified path does not exist or is not a directory, falling back to `/run/secrets` if available.
 - Each mounted secret file must have a filename matching the lowercase configuration field name (e.g. `/run/secrets/secret_key`).
+- **Precedence Note**: In `pydantic-settings`, environment variables and `.env` files take precedence over mounted secret files. If you mount secrets via `/run/secrets` or `SECRETS_DIR`, ensure you remove or comment out `SECRET_KEY` in your `.env` file so that a placeholder or development value does not shadow your mounted secret and trigger production validation failures.
 
 ### Adding a New Setting
 

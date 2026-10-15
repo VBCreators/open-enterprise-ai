@@ -161,12 +161,18 @@ def test_production_with_debug_false_succeeds(monkeypatch: pytest.MonkeyPatch) -
 
 
 def test_production_insecure_default_secret_key_fails(
-    monkeypatch: pytest.MonkeyPatch,
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
     """Verify startup fails if APP_ENV is production and default SECRET_KEY is used."""
     monkeypatch.setenv("APP_ENV", "production")
     monkeypatch.setenv("DEBUG", "false")
     monkeypatch.delenv("SECRET_KEY", raising=False)
+    monkeypatch.delenv("SECRETS_DIR", raising=False)
+    empty_secrets = tmp_path / "empty_secrets"
+    empty_secrets.mkdir()
+    monkeypatch.setattr(
+        "open_enterprise_ai.core.config.DEFAULT_CONTAINER_SECRETS_DIR", empty_secrets
+    )
 
     with pytest.raises(
         ValidationError, match="SECRET_KEY must be set to a secure, non-default value"
@@ -199,6 +205,36 @@ def test_production_short_secret_key_fails(monkeypatch: pytest.MonkeyPatch) -> N
     with pytest.raises(
         ValidationError,
         match=f"SECRET_KEY must be at least {MIN_PRODUCTION_SECRET_KEY_LENGTH} characters",
+    ):
+        Settings(_env_file=())
+
+
+def test_production_whitespace_only_secret_key_fails(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Verify startup fails if APP_ENV is production and SECRET_KEY is whitespace-only."""
+    monkeypatch.setenv("APP_ENV", "production")
+    monkeypatch.setenv("DEBUG", "false")
+    monkeypatch.setenv("SECRET_KEY", " " * MIN_PRODUCTION_SECRET_KEY_LENGTH)
+
+    with pytest.raises(
+        ValidationError,
+        match=f"SECRET_KEY must be at least {MIN_PRODUCTION_SECRET_KEY_LENGTH} characters",
+    ):
+        Settings(_env_file=())
+
+
+def test_production_insecure_default_with_whitespace_fails(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Verify startup fails if APP_ENV is production and default key has whitespace padding."""
+    monkeypatch.setenv("APP_ENV", "production")
+    monkeypatch.setenv("DEBUG", "false")
+    monkeypatch.setenv("SECRET_KEY", "  insecure-dev-secret-change-in-production \t\n")
+
+    with pytest.raises(
+        ValidationError,
+        match="SECRET_KEY must be set to a secure, non-default value",
     ):
         Settings(_env_file=())
 
@@ -299,3 +335,59 @@ def test_secrets_dir_run_secrets_fallback(
 
     settings = Settings(_env_file=())
     assert settings.SECRET_KEY.get_secret_value() == "run-secrets-mounted-value"
+
+
+def test_dotenv_overrides_mounted_secret(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """Verify dotenv (.env) values take precedence over mounted secrets in secrets_dir."""
+    secrets_dir = tmp_path / "secrets"
+    secrets_dir.mkdir()
+    secret_file = secrets_dir / "secret_key"
+    secret_file.write_text("mounted-secret-value", encoding="utf-8")
+
+    monkeypatch.setenv("SECRETS_DIR", str(secrets_dir))
+    monkeypatch.delenv("SECRET_KEY", raising=False)
+
+    # Case 1: .env provides SECRET_KEY -> dotenv overrides secrets_dir
+    env_file = tmp_path / ".env"
+    env_file.write_text(
+        "SECRET_KEY=dotenv-override-secret-key-12345\n", encoding="utf-8"
+    )
+
+    settings_with_env_secret = Settings(_env_file=(env_file,))
+    assert (
+        settings_with_env_secret.SECRET_KEY.get_secret_value()
+        == "dotenv-override-secret-key-12345"
+    )
+
+    # Case 2: .env omits SECRET_KEY -> secrets_dir mounted value is loaded
+    env_file_no_secret = tmp_path / ".env.no_secret"
+    env_file_no_secret.write_text("APP_PORT=8080\n", encoding="utf-8")
+
+    settings_fallback_to_mounted = Settings(_env_file=(env_file_no_secret,))
+    assert (
+        settings_fallback_to_mounted.SECRET_KEY.get_secret_value()
+        == "mounted-secret-value"
+    )
+
+
+def test_invalid_secrets_dir_falls_back_to_run_secrets(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """Verify non-existent SECRETS_DIR path falls back to /run/secrets when available."""
+    fake_run_secrets = tmp_path / "run_secrets"
+    fake_run_secrets.mkdir()
+    secret_file = fake_run_secrets / "secret_key"
+    secret_file.write_text("run-secrets-fallback-value", encoding="utf-8")
+
+    monkeypatch.setattr(
+        "open_enterprise_ai.core.config.DEFAULT_CONTAINER_SECRETS_DIR", fake_run_secrets
+    )
+    # Point SECRETS_DIR to a missing directory path
+    missing_dir = tmp_path / "does_not_exist"
+    monkeypatch.setenv("SECRETS_DIR", str(missing_dir))
+    monkeypatch.delenv("SECRET_KEY", raising=False)
+
+    settings = Settings(_env_file=())
+    assert settings.SECRET_KEY.get_secret_value() == "run-secrets-fallback-value"

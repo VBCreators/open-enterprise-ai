@@ -95,7 +95,7 @@ class Settings(BaseSettings):
         if self.APP_ENV == "production":
             if self.DEBUG:
                 raise ValueError("DEBUG must not be True in production environment")
-            secret_val = self.SECRET_KEY.get_secret_value()
+            secret_val = self.SECRET_KEY.get_secret_value().strip()
             if secret_val in INSECURE_DEFAULT_SECRET_KEYS:
                 raise ValueError(
                     "SECRET_KEY must be set to a secure, non-default value in production"
