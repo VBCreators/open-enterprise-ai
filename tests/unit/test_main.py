@@ -35,15 +35,36 @@ def test_production_environment_disables_docs(
     monkeypatch.setenv("SECRET_KEY", "secure-production-secret-12345")
     get_settings.cache_clear()
 
-    app = create_app()
-    assert app.docs_url is None
-    assert app.openapi_url is None
+    try:
+        app = create_app()
+        assert app.docs_url is None
+        assert app.openapi_url is None
 
-    client = TestClient(app)
-    docs_resp = client.get("/docs")
-    assert docs_resp.status_code == 404
-    assert docs_resp.headers["content-type"] == "application/problem+json"
+        client = TestClient(app)
+        docs_resp = client.get("/docs")
+        assert docs_resp.status_code == 404
+        assert docs_resp.headers["content-type"] == "application/problem+json"
 
-    openapi_resp = client.get("/openapi.json")
-    assert openapi_resp.status_code == 404
-    assert openapi_resp.headers["content-type"] == "application/problem+json"
+        openapi_resp = client.get("/openapi.json")
+        assert openapi_resp.status_code == 404
+        assert openapi_resp.headers["content-type"] == "application/problem+json"
+    finally:
+        get_settings.cache_clear()
+
+
+def test_production_environment_rejects_debug_mode(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Verify production environment rejects DEBUG=True at startup."""
+    monkeypatch.setenv("APP_ENV", "production")
+    monkeypatch.setenv("DEBUG", "true")
+    monkeypatch.setenv("SECRET_KEY", "secure-production-secret-12345")
+    get_settings.cache_clear()
+
+    try:
+        with pytest.raises(
+            ValueError, match="DEBUG must not be True in production environment"
+        ):
+            create_app()
+    finally:
+        get_settings.cache_clear()

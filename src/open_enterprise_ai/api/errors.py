@@ -2,6 +2,7 @@
 
 import http
 import logging
+import traceback
 from typing import Any
 
 from fastapi import FastAPI, Request, status
@@ -31,11 +32,26 @@ def _create_problem_response(
         request_id=request_id,
         errors=errors,
     )
+    # Apply exception-specific headers first, filtering reserved security keys case-insensitively
+    security_headers = {
+        "X-Content-Type-Options": "nosniff",
+        "Referrer-Policy": "no-referrer",
+        "Cache-Control": "no-store",
+        "X-Frame-Options": "DENY",
+    }
+    reserved = {k.lower() for k in security_headers} | {"x-request-id"}
+    response_headers: dict[str, str] = {
+        k: v for k, v in (headers or {}).items() if k.lower() not in reserved
+    }
+    response_headers.update(security_headers)
+    if request_id:
+        response_headers["X-Request-ID"] = request_id
+
     return JSONResponse(
         status_code=status_code,
         content=problem.model_dump(mode="json", exclude_none=True),
         media_type="application/problem+json",
-        headers=headers,
+        headers=response_headers,
     )
 
 
@@ -69,11 +85,24 @@ async def validation_exception_handler(
     request_id = getattr(request.state, "request_id", None)
     sanitized_errors: list[dict[str, Any]] = []
     for err in exc.errors():
+        err_type = str(err.get("type", "value_error"))
+        loc_items = [str(loc_item) for loc_item in err.get("loc", ())]
+        if err_type == "extra_forbidden" and loc_items:
+            # Redact user-supplied unknown key name so secrets in key names are never reflected
+            loc_items[-1] = "[extra_field]"
+
+        # Redact raw messages for custom validator errors which could reflect submitted input
+        msg = (
+            "Invalid input value"
+            if err_type == "value_error"
+            else str(err.get("msg", "Invalid value"))
+        )
+
         sanitized_errors.append(
             {
-                "loc": [str(loc_item) for loc_item in err.get("loc", ())],
-                "type": str(err.get("type", "value_error")),
-                "msg": str(err.get("msg", "Invalid value")),
+                "loc": loc_items,
+                "type": err_type,
+                "msg": msg,
             }
         )
     return _create_problem_response(
@@ -88,8 +117,18 @@ async def validation_exception_handler(
 
 async def unhandled_exception_handler(request: Request, exc: Exception) -> JSONResponse:
     request_id = getattr(request.state, "request_id", None)
-    logger.exception(
-        "Unhandled server error occurred",
+    tb_frames = traceback.extract_tb(exc.__traceback__) if exc.__traceback__ else None
+    if tb_frames:
+        summary_frames = [f"{f.filename}:{f.lineno} in {f.name}" for f in tb_frames]
+        location = " -> ".join(summary_frames)
+    else:
+        location = "unknown"
+
+    logger.error(
+        "Unhandled server error occurred [request_id=%s]: %s [%s]",
+        request_id,
+        exc.__class__.__name__,
+        location,
         extra={"request_id": request_id},
     )
     return _create_problem_response(

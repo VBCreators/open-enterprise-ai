@@ -4,7 +4,7 @@ import re
 
 import pytest
 from fastapi.testclient import TestClient
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 from open_enterprise_ai import __version__
 from open_enterprise_ai.core.config import get_settings
@@ -55,12 +55,15 @@ def test_production_environment_includes_hsts(
     monkeypatch.setenv("SECRET_KEY", "secure-production-secret-12345")
     get_settings.cache_clear()
 
-    app = create_app()
-    prod_client = TestClient(app)
-    response = prod_client.get("/health")
-    assert response.headers["strict-transport-security"] == (
-        "max-age=31536000; includeSubDomains"
-    )
+    try:
+        app = create_app()
+        prod_client = TestClient(app)
+        response = prod_client.get("/health")
+        assert response.headers["strict-transport-security"] == (
+            "max-age=31536000; includeSubDomains"
+        )
+    finally:
+        get_settings.cache_clear()
 
 
 def test_rfc4122_uuid_request_id_preserved(client: TestClient) -> None:
@@ -107,6 +110,10 @@ def test_not_found_returns_rfc7807_problem_detail(client: TestClient) -> None:
     response = client.get("/unknown-endpoint-route")
     assert response.status_code == 404
     assert response.headers["content-type"] == "application/problem+json"
+    assert response.headers["x-content-type-options"] == "nosniff"
+    assert response.headers["referrer-policy"] == "no-referrer"
+    assert response.headers["cache-control"] == "no-store"
+    assert response.headers["x-frame-options"] == "DENY"
     data = response.json()
     assert data["type"] == "urn:problem:http-404"
     assert data["title"] == "Not Found"
@@ -115,11 +122,19 @@ def test_not_found_returns_rfc7807_problem_detail(client: TestClient) -> None:
 
 
 def test_validation_error_returns_rfc7807_and_redacts_input() -> None:
-    """Verify 422 validation failure returns RFC 7807 format and redacts raw inputs."""
+    """Verify 422 validation failure returns RFC 7807 format and redacts raw inputs and validator messages."""
 
     class StrictTestPayload(BaseModel):
         model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
         count: int = Field(..., ge=1, le=100)
+        custom_code: str = Field(..., min_length=1)
+
+        @field_validator("custom_code")
+        @classmethod
+        def validate_code(cls, v: str) -> str:
+            if "invalid" in v:
+                raise ValueError(f"Secret code rejected: {v}")
+            return v
 
     app = create_app()
 
@@ -129,27 +144,41 @@ def test_validation_error_returns_rfc7807_and_redacts_input() -> None:
 
     validation_client = TestClient(app)
     sensitive_token = "secret-token-must-not-leak"
+    sensitive_code = "invalid-secret-key-12345"
     response = validation_client.post(
         "/test-validation",
-        json={"count": -10, "secret_key": sensitive_token},
+        json={
+            "count": -10,
+            "custom_code": sensitive_code,
+            "secret_key": sensitive_token,
+        },
     )
 
     assert response.status_code == 422
     assert response.headers["content-type"] == "application/problem+json"
+    assert response.headers["x-content-type-options"] == "nosniff"
+    assert response.headers["x-frame-options"] == "DENY"
     data = response.json()
     assert data["type"] == "urn:problem:validation-error"
     assert data["title"] == "Unprocessable Entity"
     assert data["status"] == 422
     assert data["request_id"] is not None
-    # Invariant #8 & Threat Model: Never leak raw input or secrets
+
+    # Invariant #8 & Threat Model: Never leak raw input or secrets in body or error messages
     assert sensitive_token not in response.text
+    error_types = {e["type"] for e in data.get("errors", [])}
+    assert {"value_error", "greater_than_equal", "extra_forbidden"} <= error_types
     for error in data.get("errors", []):
         assert "input" not in error
         assert "ctx" not in error
+        if error["type"] == "value_error":
+            assert error["msg"] == "Invalid input value"
+        elif error["type"] == "greater_than_equal":
+            assert "greater than or equal to" in error["msg"]
 
 
 def test_unhandled_error_returns_sanitized_rfc7807_problem_detail() -> None:
-    """Verify 500 unhandled exception returns sanitized RFC 7807 without leaking tracebacks."""
+    """Verify 500 unhandled exception returns sanitized RFC 7807 with full edge security headers."""
     app = create_app()
 
     @app.get("/test-unhandled-error")
@@ -163,12 +192,20 @@ def test_unhandled_error_returns_sanitized_rfc7807_problem_detail() -> None:
 
     assert response.status_code == 500
     assert response.headers["content-type"] == "application/problem+json"
+    # CR-2 & Invariant #13: Ensure unhandled 500 responses still carry edge security headers
+    assert response.headers["x-content-type-options"] == "nosniff"
+    assert response.headers["referrer-policy"] == "no-referrer"
+    assert response.headers["cache-control"] == "no-store"
+    assert response.headers["x-frame-options"] == "DENY"
+    assert response.headers["x-request-id"] is not None
+
     data = response.json()
     assert data["type"] == "urn:problem:internal-server-error"
     assert data["title"] == "Internal Server Error"
     assert data["status"] == 500
     assert data["detail"] == "An internal server error occurred."
     assert data["request_id"] is not None
+
     # Invariant #8 & Threat Model: Never leak stack trace, connection strings, or credentials
     assert "Traceback" not in response.text
     assert "supersecret" not in response.text
