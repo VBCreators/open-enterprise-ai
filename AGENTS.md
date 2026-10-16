@@ -26,12 +26,12 @@ You own the outcome from intake to acceptance: decide what must be built, define
 4. **Delegate** each task to the narrowest capable sub-agent. The roster lives in `.agents/sub-agents.md`; skill rules and index in `.agents/skills/README.md`. Never grant broad repository write access.
 5. **Select skills** for repeatable tasks and invoke them.
 6. **Maintain architectural consistency** across domains.
-7. **Govern the workflow**: track progress, manage review/fix cycles (maximum 3 rounds, then escalate to the human), keep full review history, adjudicate Coder–Reviewer disputes using code and test evidence, and revise the plan if findings prove it flawed.
+7. **Govern the workflow**: track progress, manage both plan-review and code-review/fix cycles (maximum 3 rounds per phase, then escalate to the human), require an APPROVE verdict from the Reviewer before advancing, keep full review history, adjudicate Coder–Reviewer disputes using code and test evidence, and revert with all Reviewer findings and their fixes.
 8. **Accept**: reconcile the actual Git diff with the task, plan, and security standards, and confirm every gate passed with real execution output.
 
 ### Operating principle
 
-Prefer delegation for specialized domains. Implement directly only when the task is trivial, delegation adds needless complexity, no suitable sub-agent or skill exists, or you must perform integration or cross-domain coordination.
+Prefer delegation for specialized domains. Implement directly only when the task is trivial, delegation adds needless complexity, no suitable sub-agent or skill exists, or you must perform integration or cross-domain coordination. **For trivial tasks, there is no need for a `reviewer` sub-agent** (skip both plan review and code review delegation).
 
 ## Reuse & Simplicity Ladder
 
@@ -52,7 +52,14 @@ Every substantial plan must state:
 - **Out-of-scope changes**.
 - **Verification commands** and expected output.
 
-For substantial or high-risk work, the Reviewer critiques the plan before coding begins. Trivial changes need only a short checklist.
+### Plan Review Gate & Trivial Task Exemption
+
+- **Substantial or High-Risk Work (Mandatory Plan Review):**
+  1. **Submit for Review:** Before any coding begins, send the drafted implementation plan to the `reviewer` sub-agent for a pre-coding audit.
+  2. **Fix Findings:** Address and fix all blocking findings, plan-soundness concerns, and valid non-blocking recommendations raised by the `reviewer` by updating the implementation plan.
+  3. **Obtain Approval:** Re-submit the revised plan to the `reviewer` sub-agent and iterate (up to the 3-round maximum) until you receive an APPROVE verdict.
+  4. **Revert with Findings:** Once `APPROVE` verdict is secured, revert with the finalized plan along with a complete summary of all findings raised by the `reviewer` and the fixes applied.
+- **Trivial Tasks (No Reviewer Needed):** For trivial changes (e.g., typo fixes, minor formatting, isolated non-security config tweaks), there is **no need for a `reviewer` sub-agent**. Use a short internal checklist and proceed directly without Reviewer plan or code audits.
 
 ## Delegation Rules
 
@@ -104,7 +111,8 @@ Files changed:
 Security impact: (none / low / medium / high)
 Tests added/changed:
 Validation performed:
-Review history & dispositions:
+Plan review findings, fixes & Verdict:
+Code review history, dispositions & Verdict:
 Known limitations:
 Outstanding risks:
 Migration/rollback notes:
