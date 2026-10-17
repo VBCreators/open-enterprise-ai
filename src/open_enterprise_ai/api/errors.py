@@ -1,18 +1,18 @@
 """RFC 7807 problem details exception handlers."""
 
 import http
-import logging
-import traceback
 from typing import Any
 
+import structlog
 from fastapi import FastAPI, Request, status
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
 from starlette.exceptions import HTTPException as StarletteHTTPException
 
 from open_enterprise_ai.api.schemas import ProblemDetail
+from open_enterprise_ai.core.exceptions import AppException
 
-logger = logging.getLogger(__name__)
+logger = structlog.get_logger(__name__)
 
 
 def _create_problem_response(
@@ -52,6 +52,36 @@ def _create_problem_response(
         content=problem.model_dump(mode="json", exclude_none=True),
         media_type="application/problem+json",
         headers=response_headers,
+    )
+
+
+async def app_exception_handler(request: Request, exc: AppException) -> JSONResponse:
+    request_id = getattr(request.state, "request_id", None)
+    if exc.status_code >= 500:
+        logger.error(
+            "internal_app_error",
+            request_id=request_id,
+            error_code=exc.error_code,
+            exc_info=exc,
+        )
+        try:
+            title = http.HTTPStatus(exc.status_code).phrase
+        except ValueError:
+            title = "Internal Server Error"
+        return _create_problem_response(
+            status_code=exc.status_code,
+            type_uri="urn:problem:internal-server-error",
+            title=title,
+            detail="An internal server error occurred.",
+            request_id=request_id,
+        )
+
+    return _create_problem_response(
+        status_code=exc.status_code,
+        type_uri=f"urn:problem:{exc.error_code.lower().replace('_', '-')}",
+        title=exc.message,
+        detail=exc.detail,
+        request_id=request_id,
     )
 
 
@@ -117,19 +147,10 @@ async def validation_exception_handler(
 
 async def unhandled_exception_handler(request: Request, exc: Exception) -> JSONResponse:
     request_id = getattr(request.state, "request_id", None)
-    tb_frames = traceback.extract_tb(exc.__traceback__) if exc.__traceback__ else None
-    if tb_frames:
-        summary_frames = [f"{f.filename}:{f.lineno} in {f.name}" for f in tb_frames]
-        location = " -> ".join(summary_frames)
-    else:
-        location = "unknown"
-
     logger.error(
-        "Unhandled server error occurred [request_id=%s]: %s [%s]",
-        request_id,
-        exc.__class__.__name__,
-        location,
-        extra={"request_id": request_id},
+        "unhandled_server_error",
+        request_id=request_id,
+        exc_info=exc,
     )
     return _create_problem_response(
         status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
@@ -142,6 +163,7 @@ async def unhandled_exception_handler(request: Request, exc: Exception) -> JSONR
 
 def register_exception_handlers(app: FastAPI) -> None:
     """Register RFC 7807 problem details handlers on the FastAPI application."""
+    app.add_exception_handler(AppException, app_exception_handler)  # type: ignore[arg-type]
     app.add_exception_handler(StarletteHTTPException, http_exception_handler)  # type: ignore[arg-type]
     app.add_exception_handler(RequestValidationError, validation_exception_handler)  # type: ignore[arg-type]
     app.add_exception_handler(Exception, unhandled_exception_handler)
