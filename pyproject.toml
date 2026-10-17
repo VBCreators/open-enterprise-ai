@@ -21,6 +21,10 @@ requires = ["uv_build>=0.12.5,<0.13.0"]
 build-backend = "uv_build"
 
 [dependency-groups]
+ui = [
+    "httpx>=0.28.1",
+    "streamlit>=1.45.0",
+]
 dev = [
     "bandit[toml]>=1.9.4",
     "httpx>=0.28.1",
@@ -31,3 +35,34 @@ dev = [
     "pytest-cov>=7.1.0",
     "ruff>=0.16.10",
 ]
+
+# --- Frontend/backend boundary enforcement -------------------------------
+# TID251 is NOT in ruff's default rule set, so it must be enabled explicitly,
+# otherwise the banned-api entry below does nothing.
+[tool.ruff.lint]
+extend-select = ["TID251"]
+
+[tool.ruff.lint.flake8-tidy-imports.banned-api]
+"open_enterprise_ai".msg = "Direct imports from 'open_enterprise_ai' are forbidden in frontend/ (and tests/unit/frontend/). Communicate exclusively via HTTP APIs."
+
+# The ban applies everywhere EXCEPT backend code and backend tests.
+# tests/unit/frontend/ is deliberately NOT exempted, so frontend tests are
+# held to the same boundary as frontend code.
+[tool.ruff.lint.per-file-ignores]
+"src/**" = ["TID251"]
+"tests/conftest.py" = ["TID251"]
+"tests/unit/test_*.py" = ["TID251"]
+"tests/unit/api/**" = ["TID251"]
+"tests/unit/core/**" = ["TID251"]
+"tests/unit/domains/**" = ["TID251"]
+"tests/unit/infrastructure/**" = ["TID251"]
+"tests/unit/shared/**" = ["TID251"]
+"tests/integration/**" = ["TID251"]
+"tests/e2e/**" = ["TID251"]
+"tests/factories/**" = ["TID251"]
+
+# frontend/ is not part of the backend wheel; make `streamlit_app` importable
+# for tests without packaging it into the backend.
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["frontend"]
