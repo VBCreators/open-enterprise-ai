@@ -3,11 +3,21 @@
 import re
 
 import pytest
+import structlog
 from fastapi.testclient import TestClient
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 from open_enterprise_ai import __version__
 from open_enterprise_ai.core.config import get_settings
+from open_enterprise_ai.core.exceptions import (
+    AppException,
+    BadRequestError,
+    ConflictError,
+    ForbiddenError,
+    NotFoundError,
+    UnauthorizedError,
+    ValidationAppError,
+)
 from open_enterprise_ai.main import create_app
 
 
@@ -210,3 +220,124 @@ def test_unhandled_error_returns_sanitized_rfc7807_problem_detail() -> None:
     assert "Traceback" not in response.text
     assert "supersecret" not in response.text
     assert "postgres://" not in response.text
+
+
+@pytest.mark.parametrize(
+    ("exc_instance", "expected_status", "expected_type", "expected_title"),
+    [
+        (NotFoundError(), 404, "urn:problem:resource-not-found", "Resource not found."),
+        (
+            ConflictError(),
+            409,
+            "urn:problem:resource-conflict",
+            "Resource conflict occurred.",
+        ),
+        (
+            UnauthorizedError(),
+            401,
+            "urn:problem:unauthorized",
+            "Authentication required.",
+        ),
+        (ForbiddenError(), 403, "urn:problem:forbidden", "Access forbidden."),
+        (BadRequestError(), 400, "urn:problem:bad-request", "Bad request."),
+        (
+            ValidationAppError(),
+            422,
+            "urn:problem:validation-error",
+            "Validation failed.",
+        ),
+    ],
+)
+def test_app_exception_mapping_to_rfc7807(
+    exc_instance: Exception,
+    expected_status: int,
+    expected_type: str,
+    expected_title: str,
+) -> None:
+    """Verify AppException and subclasses map to RFC 7807 with correct status and type."""
+    app = create_app()
+
+    @app.get("/test-app-exception")
+    async def domain_target() -> None:
+        raise exc_instance
+
+    app_client = TestClient(app)
+    response = app_client.get(
+        "/test-app-exception", headers={"X-Request-ID": "req_domain_err_12345"}
+    )
+
+    assert response.status_code == expected_status
+    assert response.headers["content-type"] == "application/problem+json"
+    assert response.headers["x-content-type-options"] == "nosniff"
+    assert response.headers["referrer-policy"] == "no-referrer"
+    assert response.headers["cache-control"] == "no-store"
+    assert response.headers["x-frame-options"] == "DENY"
+    assert response.headers["x-request-id"] == "req_domain_err_12345"
+
+    data = response.json()
+    assert data["type"] == expected_type
+    assert data["title"] == expected_title
+    assert data["status"] == expected_status
+    assert data["request_id"] == "req_domain_err_12345"
+
+
+def test_request_id_contextvars_lifecycle() -> None:
+    """Verify request_id is bound in contextvars during request and cleared afterwards."""
+    app = create_app()
+    bound_request_id: dict[str, str | None] = {"id": None}
+
+    @app.get("/test-contextvars")
+    async def contextvars_target() -> dict[str, str]:
+        ctx = structlog.contextvars.get_contextvars()
+        bound_request_id["id"] = ctx.get("request_id")
+        return {"status": "ok"}
+
+    test_client = TestClient(app)
+    test_id = "req_contextvars_trace_9999"
+    response = test_client.get("/test-contextvars", headers={"X-Request-ID": test_id})
+
+    assert response.status_code == 200
+    assert bound_request_id["id"] == test_id
+
+    # Verify a following request does not see the previous request_id
+    second = test_client.get("/test-contextvars")
+    assert second.status_code == 200
+    assert bound_request_id["id"] == second.headers["x-request-id"]
+    assert bound_request_id["id"] != test_id
+
+
+def test_server_side_app_exception_sanitizes_response() -> None:
+    """Verify AppException with status_code >= 500 returns generic sanitized RFC 7807 problem details."""
+    app = create_app()
+
+    @app.get("/test-server-app-exception")
+    async def failing_target() -> None:
+        raise AppException(
+            message="Internal database deadlock failure: secret_token_xyz",
+            status_code=500,
+            detail="Sensitive internal diagnostics: connection pool exhausted",
+            error_code="DATABASE_FAILURE",
+        )
+
+    error_client = TestClient(app, raise_server_exceptions=False)
+    response = error_client.get(
+        "/test-server-app-exception", headers={"X-Request-ID": "req_server_err_9999"}
+    )
+
+    assert response.status_code == 500
+    assert response.headers["content-type"] == "application/problem+json"
+    assert response.headers["x-content-type-options"] == "nosniff"
+    assert response.headers["x-frame-options"] == "DENY"
+    assert response.headers["x-request-id"] == "req_server_err_9999"
+
+    data = response.json()
+    assert data["type"] == "urn:problem:internal-server-error"
+    assert data["title"] == "Internal Server Error"
+    assert data["status"] == 500
+    assert data["detail"] == "An internal server error occurred."
+    assert data["request_id"] == "req_server_err_9999"
+
+    # Verify no sensitive messages or details leaked to client
+    assert "secret_token_xyz" not in response.text
+    assert "Sensitive internal diagnostics" not in response.text
+    assert "connection pool exhausted" not in response.text
