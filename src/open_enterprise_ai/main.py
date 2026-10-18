@@ -4,11 +4,16 @@ from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI
+from starlette.middleware import Middleware
 
 from open_enterprise_ai.api import api_router
 from open_enterprise_ai.api.errors import register_exception_handlers
-from open_enterprise_ai.api.middleware import RequestContextMiddleware
+from open_enterprise_ai.api.middleware import (
+    AccessLogMiddleware,
+    RequestContextMiddleware,
+)
 from open_enterprise_ai.core.config import get_settings
+from open_enterprise_ai.core.logging import configure_logging
 
 
 @asynccontextmanager
@@ -28,6 +33,8 @@ def create_app() -> FastAPI:
     settings = get_settings()
     is_production = settings.APP_ENV == "production"
 
+    configure_logging(settings)
+
     app = FastAPI(
         title=settings.APP_NAME,
         debug=settings.DEBUG,
@@ -35,11 +42,10 @@ def create_app() -> FastAPI:
         docs_url=None if is_production else "/docs",
         redoc_url=None,
         openapi_url=None if is_production else "/openapi.json",
-    )
-
-    app.add_middleware(
-        RequestContextMiddleware,
-        is_production=is_production,
+        middleware=[
+            Middleware(RequestContextMiddleware, is_production=is_production),
+            Middleware(AccessLogMiddleware),
+        ],
     )
 
     register_exception_handlers(app)

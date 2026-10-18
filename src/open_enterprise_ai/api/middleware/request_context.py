@@ -4,6 +4,7 @@ import re
 import uuid
 from collections.abc import Awaitable, Callable
 
+import structlog
 from starlette.middleware.base import BaseHTTPMiddleware
 from starlette.requests import Request
 from starlette.responses import Response
@@ -30,8 +31,13 @@ class RequestContextMiddleware(BaseHTTPMiddleware):
             request_id = uuid.uuid4().hex
 
         request.state.request_id = request_id
+        structlog.contextvars.clear_contextvars()
+        structlog.contextvars.bind_contextvars(request_id=request_id)
 
-        response = await call_next(request)
+        try:
+            response = await call_next(request)
+        finally:
+            structlog.contextvars.clear_contextvars()
 
         response.headers["X-Request-ID"] = request_id
         response.headers["X-Content-Type-Options"] = "nosniff"

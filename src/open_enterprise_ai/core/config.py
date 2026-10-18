@@ -64,7 +64,9 @@ class Settings(BaseSettings):
     LOG_LEVEL: LogLevelType = "INFO"
 
     # Secret fields (masked in repr, tracebacks, and logs)
-    SECRET_KEY: SecretStr = SecretStr("insecure-dev-secret-change-in-production")
+    SECRET_KEY: SecretStr = SecretStr(  # audit: ignore[SEC011] -- default development secret key for local non-production bootstrap
+        "insecure-dev-secret-change-in-production"
+    )
 
     def __init__(self, **values: Any) -> None:
         # Bootstrap: APP_ENV is resolved exclusively from the OS environment
