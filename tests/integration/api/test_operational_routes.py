@@ -1,6 +1,8 @@
 """Integration tests for operational endpoints, middleware, and error handling."""
 
+import logging
 import re
+from typing import Any
 
 import pytest
 import structlog
@@ -225,31 +227,31 @@ def test_unhandled_error_returns_sanitized_rfc7807_problem_detail() -> None:
 @pytest.mark.parametrize(
     ("exc_instance", "expected_status", "expected_type", "expected_title"),
     [
-        (NotFoundError(), 404, "urn:problem:resource-not-found", "Resource not found."),
+        (NotFoundError(), 404, "urn:problem:resource-not-found", "Not Found"),
         (
             ConflictError(),
             409,
             "urn:problem:resource-conflict",
-            "Resource conflict occurred.",
+            "Conflict",
         ),
         (
             UnauthorizedError(),
             401,
             "urn:problem:unauthorized",
-            "Authentication required.",
+            "Unauthorized",
         ),
-        (ForbiddenError(), 403, "urn:problem:forbidden", "Access forbidden."),
-        (BadRequestError(), 400, "urn:problem:bad-request", "Bad request."),
+        (ForbiddenError(), 403, "urn:problem:forbidden", "Forbidden"),
+        (BadRequestError(), 400, "urn:problem:bad-request", "Bad Request"),
         (
             ValidationAppError(),
             422,
             "urn:problem:validation-error",
-            "Validation failed.",
+            "Unprocessable Content",
         ),
     ],
 )
 def test_app_exception_mapping_to_rfc7807(
-    exc_instance: Exception,
+    exc_instance: AppException,
     expected_status: int,
     expected_type: str,
     expected_title: str,
@@ -278,7 +280,36 @@ def test_app_exception_mapping_to_rfc7807(
     assert data["type"] == expected_type
     assert data["title"] == expected_title
     assert data["status"] == expected_status
+    assert data["detail"] == exc_instance.detail
     assert data["request_id"] == "req_domain_err_12345"
+
+
+def test_app_exception_long_message_and_detail_do_not_cause_500() -> None:
+    """Verify AppException with message > 100 chars and detail > 1000 chars is safely truncated without causing a 500 ValidationError."""
+    app = create_app()
+
+    @app.get("/test-long-app-exception")
+    async def long_err_target() -> None:
+        raise NotFoundError(
+            message="Very long custom domain message " * 10,
+            detail="Very long custom detail " * 50,
+        )
+
+    app_client = TestClient(app)
+    response = app_client.get(
+        "/test-long-app-exception",
+        headers={"X-Request-ID": "req_long_err_12345"},
+    )
+
+    assert response.status_code == 404
+    assert response.headers["content-type"] == "application/problem+json"
+    data = response.json()
+    assert data["type"] == "urn:problem:resource-not-found"
+    assert data["title"] == "Not Found"
+    assert data["status"] == 404
+    assert data["detail"] is not None
+    assert len(data["detail"]) == 1000
+    assert data["request_id"] == "req_long_err_12345"
 
 
 def test_request_id_contextvars_lifecycle() -> None:
@@ -306,9 +337,13 @@ def test_request_id_contextvars_lifecycle() -> None:
     assert bound_request_id["id"] != test_id
 
 
-def test_server_side_app_exception_sanitizes_response() -> None:
-    """Verify AppException with status_code >= 500 returns generic sanitized RFC 7807 problem details."""
+def test_server_side_app_exception_sanitizes_response(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """Verify AppException with status_code >= 500 logs diagnostics with redaction and returns generic sanitized RFC 7807 problem details."""
     app = create_app()
+    logging.getLogger().addHandler(caplog.handler)
+    caplog.set_level(logging.ERROR)
 
     @app.get("/test-server-app-exception")
     async def failing_target() -> None:
@@ -317,6 +352,7 @@ def test_server_side_app_exception_sanitizes_response() -> None:
             status_code=500,
             detail="Sensitive internal diagnostics: connection pool exhausted",
             error_code="DATABASE_FAILURE",
+            context={"db_password": "super_secret_password", "safe_metric": 42},
         )
 
     error_client = TestClient(app, raise_server_exceptions=False)
@@ -339,5 +375,32 @@ def test_server_side_app_exception_sanitizes_response() -> None:
 
     # Verify no sensitive messages or details leaked to client
     assert "secret_token_xyz" not in response.text
+    assert "super_secret_password" not in response.text
     assert "Sensitive internal diagnostics" not in response.text
     assert "connection pool exhausted" not in response.text
+
+    # Verify structured logging captured diagnostic event with redaction
+    internal_records = [
+        r
+        for r in caplog.records
+        if (isinstance(r.msg, dict) and r.msg.get("event") == "internal_app_error")
+        or "internal_app_error" in getattr(r, "message", "")
+        or "internal_app_error" in str(r.msg)
+    ]
+    assert len(internal_records) > 0
+    record = internal_records[0]
+    if isinstance(record.msg, dict):
+        log_payload: dict[str, Any] = record.msg
+        assert log_payload.get("event") == "internal_app_error"
+        assert (
+            log_payload.get("detail")
+            == "Sensitive internal diagnostics: connection pool exhausted"
+        )
+        context_dict = log_payload.get("context")
+        assert isinstance(context_dict, dict)
+        assert context_dict.get("db_password") == "[REDACTED]"
+        assert context_dict.get("safe_metric") == 42
+    else:
+        assert "[REDACTED]" in str(record.msg)
+        assert "super_secret_password" not in str(record.msg)
+        assert "42" in str(record.msg)

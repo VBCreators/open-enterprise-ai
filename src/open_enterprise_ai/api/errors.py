@@ -24,12 +24,21 @@ def _create_problem_response(
     errors: list[dict[str, Any]] | None = None,
     headers: dict[str, str] | None = None,
 ) -> JSONResponse:
+    safe_type = (
+        type_uri.strip()[:200] if type_uri and type_uri.strip() else "about:blank"
+    )
+    safe_title = title.strip()[:100] if title and title.strip() else "Error"
+    safe_detail = detail.strip()[:1000] if detail and detail.strip() else None
+    safe_request_id = (
+        request_id.strip()[:64] if request_id and request_id.strip() else None
+    )
+
     problem = ProblemDetail(
-        type=type_uri,
-        title=title,
+        type=safe_type,
+        title=safe_title,
         status=status_code,
-        detail=detail,
-        request_id=request_id,
+        detail=safe_detail,
+        request_id=safe_request_id,
         errors=errors,
     )
     # Apply exception-specific headers first, filtering reserved security keys case-insensitively
@@ -44,8 +53,8 @@ def _create_problem_response(
         k: v for k, v in (headers or {}).items() if k.lower() not in reserved
     }
     response_headers.update(security_headers)
-    if request_id:
-        response_headers["X-Request-ID"] = request_id
+    if safe_request_id:
+        response_headers["X-Request-ID"] = safe_request_id
 
     return JSONResponse(
         status_code=status_code,
@@ -62,6 +71,8 @@ async def app_exception_handler(request: Request, exc: AppException) -> JSONResp
             "internal_app_error",
             request_id=request_id,
             error_code=exc.error_code,
+            detail=exc.detail,
+            context=exc.context,
             exc_info=exc,
         )
         try:
@@ -76,11 +87,18 @@ async def app_exception_handler(request: Request, exc: AppException) -> JSONResp
             request_id=request_id,
         )
 
+    try:
+        title = http.HTTPStatus(exc.status_code).phrase
+    except ValueError:
+        title = "Application Error"
+
+    raw_detail = exc.detail or exc.message
+
     return _create_problem_response(
         status_code=exc.status_code,
         type_uri=f"urn:problem:{exc.error_code.lower().replace('_', '-')}",
-        title=exc.message,
-        detail=exc.detail,
+        title=title,
+        detail=raw_detail,
         request_id=request_id,
     )
 
