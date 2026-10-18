@@ -4,19 +4,65 @@ import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
+from open_enterprise_ai import __version__
 from open_enterprise_ai.core.config import get_settings
 from open_enterprise_ai.main import create_app
 
 
-def test_create_app_returns_fastapi_instance() -> None:
-    """Verify create_app produces a valid FastAPI instance."""
-    app = create_app()
-    assert isinstance(app, FastAPI)
-    assert app.title == "open-enterprise-ai"
-    assert app.debug is False
-    assert app.docs_url == "/docs"
-    assert app.openapi_url == "/openapi.json"
-    assert app.redoc_url is None
+def test_create_app_returns_fastapi_instance(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Verify create_app produces a valid FastAPI instance with enriched OpenAPI metadata."""
+    monkeypatch.setenv("OPENAPI_CONTACT_NAME", "")
+    monkeypatch.setenv("OPENAPI_CONTACT_EMAIL", "")
+    monkeypatch.setenv("OPENAPI_CONTACT_URL", "")
+    get_settings.cache_clear()
+    try:
+        app = create_app()
+        assert isinstance(app, FastAPI)
+        assert app.title == "open-enterprise-ai"
+        assert app.version == __version__
+        assert (
+            app.summary
+            == "Enterprise AI Governance, Security, and LLM Orchestration Platform"
+        )
+        assert "Open-source enterprise AI harness" in (app.description or "")
+        assert app.contact is None
+        assert app.openapi_tags == [
+            {
+                "name": "Operational",
+                "description": "Liveness probes, operational telemetry, and application status.",
+            },
+            {
+                "name": "v1",
+                "description": "Version 1 API routes and contracts.",
+            },
+        ]
+        assert app.debug is False
+        assert app.docs_url == "/docs"
+        assert app.openapi_url == "/openapi.json"
+        assert app.redoc_url is None
+    finally:
+        get_settings.cache_clear()
+
+
+def test_create_app_configures_custom_contact(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Verify create_app configures contact from Settings when environment variables are set."""
+    monkeypatch.setenv("OPENAPI_CONTACT_NAME", "Enterprise Support")
+    monkeypatch.setenv("OPENAPI_CONTACT_EMAIL", "support@enterprise.ai")
+    monkeypatch.setenv("OPENAPI_CONTACT_URL", "https://enterprise.ai/support")
+    get_settings.cache_clear()
+    try:
+        app = create_app()
+        assert app.contact == {
+            "name": "Enterprise Support",
+            "email": "support@enterprise.ai",
+            "url": "https://enterprise.ai/support",
+        }
+    finally:
+        get_settings.cache_clear()
 
 
 def test_lifespan_initializes_state() -> None:
