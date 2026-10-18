@@ -6,6 +6,7 @@ from contextlib import asynccontextmanager
 from fastapi import FastAPI
 from starlette.middleware import Middleware
 
+from open_enterprise_ai import __version__
 from open_enterprise_ai.api import api_router
 from open_enterprise_ai.api.errors import register_exception_handlers
 from open_enterprise_ai.api.middleware import (
@@ -14,6 +15,17 @@ from open_enterprise_ai.api.middleware import (
 )
 from open_enterprise_ai.core.config import get_settings
 from open_enterprise_ai.core.logging import configure_logging
+
+openapi_tags = [
+    {
+        "name": "Operational",
+        "description": "Liveness probes, operational telemetry, and application status.",
+    },
+    {
+        "name": "v1",
+        "description": "Version 1 API routes and contracts.",
+    },
+]
 
 
 @asynccontextmanager
@@ -37,6 +49,11 @@ def create_app() -> FastAPI:
 
     app = FastAPI(
         title=settings.APP_NAME,
+        version=__version__,
+        summary="Enterprise AI Governance, Security, and LLM Orchestration Platform",
+        description="Open-source enterprise AI harness to manage, secure, and deploy AI access across your teams with provider-agnostic support for any LLM.",
+        contact=settings.openapi_contact,
+        openapi_tags=openapi_tags,
         debug=settings.DEBUG,
         lifespan=lifespan,
         docs_url=None if is_production else "/docs",

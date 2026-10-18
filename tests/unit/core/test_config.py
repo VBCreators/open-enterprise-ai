@@ -391,3 +391,68 @@ def test_invalid_secrets_dir_falls_back_to_run_secrets(
 
     settings = Settings(_env_file=())
     assert settings.SECRET_KEY.get_secret_value() == "run-secrets-fallback-value"
+
+
+def test_contact_settings_validation_rejects_invalid_email(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Verify Settings rejects invalid OPENAPI_CONTACT_EMAIL."""
+    monkeypatch.setenv("OPENAPI_CONTACT_EMAIL", "not-an-email")
+    with pytest.raises(ValidationError, match="OPENAPI_CONTACT_EMAIL"):
+        Settings(_env_file=())
+
+
+def test_contact_settings_validation_rejects_invalid_url(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Verify Settings rejects invalid OPENAPI_CONTACT_URL."""
+    monkeypatch.setenv("OPENAPI_CONTACT_URL", "not-a-valid-url")
+    with pytest.raises(ValidationError):
+        Settings(_env_file=())
+
+
+def test_contact_settings_normalizes_whitespace_to_none(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Verify whitespace-only contact fields are normalized to None."""
+    monkeypatch.setenv("OPENAPI_CONTACT_NAME", "   ")
+    monkeypatch.setenv("OPENAPI_CONTACT_EMAIL", "   ")
+    monkeypatch.setenv("OPENAPI_CONTACT_URL", "   ")
+    settings = Settings(_env_file=())
+    assert settings.OPENAPI_CONTACT_NAME is None
+    assert settings.OPENAPI_CONTACT_EMAIL is None
+    assert settings.OPENAPI_CONTACT_URL is None
+    assert settings.openapi_contact is None
+
+
+def test_contact_settings_populates_openapi_contact(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Verify valid contact settings populate openapi_contact dictionary."""
+    monkeypatch.setenv("OPENAPI_CONTACT_NAME", "Enterprise Support")
+    monkeypatch.setenv("OPENAPI_CONTACT_EMAIL", "support@enterprise.ai")
+    monkeypatch.setenv("OPENAPI_CONTACT_URL", "https://enterprise.ai/support")
+    settings = Settings(_env_file=())
+    assert settings.openapi_contact == {
+        "name": "Enterprise Support",
+        "email": "support@enterprise.ai",
+        "url": "https://enterprise.ai/support",
+    }
+
+
+def test_contact_settings_rejects_non_string_values() -> None:
+    """Verify Settings rejects non-string inputs for name and email."""
+    with pytest.raises(ValidationError, match="OPENAPI_CONTACT_EMAIL must be a string"):
+        Settings(_env_file=(), OPENAPI_CONTACT_EMAIL=12345)  # type: ignore[arg-type]
+
+    with pytest.raises(ValidationError, match="OPENAPI_CONTACT_NAME must be a string"):
+        Settings(_env_file=(), OPENAPI_CONTACT_NAME=12345)  # type: ignore[arg-type]
+
+
+def test_contact_settings_rejects_email_with_embedded_newline(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Verify regex rejects email with embedded newline or whitespace."""
+    monkeypatch.setenv("OPENAPI_CONTACT_EMAIL", "support\n@enterprise.ai")
+    with pytest.raises(ValidationError, match="OPENAPI_CONTACT_EMAIL"):
+        Settings(_env_file=())
