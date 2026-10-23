@@ -8,10 +8,10 @@ authors = [
 ]
 requires-python = ">=3.14"
 dependencies = [
-    "fastapi>=0.142.2",
-    "payload-redactor>=0.4.0",
-    "pydantic>=2.13.5",
-    "pydantic-settings>=2.15.0",
+    "fastapi>=0.161.1",
+    "payload-redactor>=0.4.1",
+    "pydantic>=2.14.1",
+    "pydantic-settings>=2.16.1",
     "structlog>=26.1.0",
 ]
 
@@ -25,17 +25,18 @@ build-backend = "uv_build"
 [dependency-groups]
 ui = [
     "httpx>=0.28.1",
-    "streamlit>=1.45.0",
+    "streamlit>=1.66.1",
 ]
 dev = [
     "bandit[toml]>=1.9.4",
     "httpx>=0.28.1",
     "mypy>=2.4.0",
     "pip-audit>=2.10.1",
-    "pre-commit>=4.6.2",
+    "pre-commit>=4.7.0",
     "pytest>=9.1.1",
     "pytest-cov>=7.1.0",
-    "ruff>=0.16.10",
+    "ruff>=0.17.2",
+    "uv-bump>=0.6.0",
 ]
 
 # --- Frontend/backend boundary enforcement -------------------------------
