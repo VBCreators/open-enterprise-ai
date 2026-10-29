@@ -6,6 +6,7 @@ from fastapi import APIRouter, Depends
 
 from open_enterprise_ai import __version__
 from open_enterprise_ai.api.schemas import HealthResponse, VersionResponse
+from open_enterprise_ai.api.v1 import v1_router
 from open_enterprise_ai.core.config import Settings, get_settings
 
 api_router = APIRouter()
@@ -14,6 +15,7 @@ api_router = APIRouter()
 @api_router.get(
     "/health",
     response_model=HealthResponse,
+    tags=["Operational"],
     summary="Service liveness probe",
     description="Operational liveness probe returning ok status for orchestrators and load balancers.",
     responses={200: {"model": HealthResponse}},
@@ -26,6 +28,7 @@ async def get_health() -> HealthResponse:
 @api_router.get(
     "/version",
     response_model=VersionResponse,
+    tags=["Operational"],
     summary="Application version and runtime metadata",
     description="Returns the application name, semantic release version, and environment.",
     responses={200: {"model": VersionResponse}},
@@ -39,3 +42,6 @@ async def get_version(
         version=__version__,
         environment=settings.APP_ENV,
     )
+
+
+api_router.include_router(v1_router)
