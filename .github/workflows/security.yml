@@ -84,7 +84,7 @@ jobs:
           GITLEAKS_ENABLE_UPLOAD_ARTIFACT: 'false'
 
       - name: Scan Repository for Secrets (TruffleHog)
-        uses: trufflesecurity/trufflehog@ea68ca03c865c5f324e86e849ced20ed3cf9dbbb # v3.99.8
+        uses: trufflesecurity/trufflehog@d232362a64a09a9e7d58267b8f5acef00ae90e23 # v3.100.0
         with:
           path: ./
           base: ${{ (github.event_name == 'push' && github.event.before != '' && github.event.before != '0000000000000000000000000000000000000000') && github.event.before || '' }}
